@@ -6,6 +6,8 @@ from typing import Literal, Optional
 from agent.services.flow_client import get_flow_client
 from agent.services.omni_flash import (
     check_omni_flash_status,
+    generate_omni_flash_first_frame_video,
+    generate_omni_flash_first_last_video,
     generate_omni_flash_video,
 )
 
@@ -28,6 +30,9 @@ class GenerateVideoRequest(BaseModel):
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     end_image_media_id: Optional[str] = None
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    # Backward compatible: legacy requests remain Veo unless explicitly set.
+    model_family: Literal["veo", "omni_flash"] = "veo"
+    duration_s: int = 8
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -124,11 +129,45 @@ async def generate_image(body: GenerateImageRequest):
 
 @router.post("/generate-video")
 async def generate_video(body: GenerateVideoRequest):
-    """Submit Veo image-to-video generation (returns operations for polling)."""
+    """Submit frame-conditioned video generation using Veo or Omni Flash.
+
+    Existing callers default to Veo. For Omni set ``model_family=omni_flash``
+    and ``duration_s`` to 4/6/8/10. With only ``start_image_media_id`` the
+    request uses Omni First frame. When ``end_image_media_id`` is also present,
+    it uses Omni First+Last frames.
+
+    Omni responses include ``flowkitPolling.workflows`` and must use workflow
+    media polling rather than legacy operation polling.
+    """
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    result = await client.generate_video(**body.model_dump(exclude_none=True))
+
+    if body.model_family == "omni_flash":
+        try:
+            common = dict(
+                start_image_media_id=body.start_image_media_id,
+                prompt=body.prompt,
+                project_id=body.project_id,
+                scene_id=body.scene_id,
+                duration_s=body.duration_s,
+                aspect_ratio=body.aspect_ratio,
+                user_paygate_tier=body.user_paygate_tier,
+            )
+            if body.end_image_media_id:
+                result = await generate_omni_flash_first_last_video(
+                    end_image_media_id=body.end_image_media_id,
+                    **common,
+                )
+            else:
+                result = await generate_omni_flash_first_frame_video(**common)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        result = await client.generate_video(
+            **body.model_dump(exclude={"model_family", "duration_s"}, exclude_none=True)
+        )
+
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     return result.get("data", result)
@@ -172,7 +211,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
 @router.post("/generate-video-omni")
 async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
-    """Submit Gemini Omni Flash R2V generation.
+    """Submit Gemini Omni Flash reference-to-video generation.
 
     The response includes ``flowkitPolling.workflows`` for the correct
     workflow/media polling path.
