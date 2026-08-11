@@ -10,6 +10,8 @@ from agent.services.omni_flash import (
     _load_model_key,
     check_omni_flash_status,
     extract_omni_workflows,
+    generate_omni_flash_first_frame_video,
+    generate_omni_flash_first_last_video,
     generate_omni_flash_video,
 )
 
@@ -23,8 +25,34 @@ from agent.services.omni_flash import (
         (10, "abra_r2v_10s"),
     ],
 )
-def test_omni_duration_model_keys(duration, expected):
+def test_omni_reference_duration_model_keys(duration, expected):
     assert _load_model_key(duration) == expected
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (4, "abra_i2v_4s"),
+        (6, "abra_i2v_6s"),
+        (8, "abra_i2v_8s"),
+        (10, "abra_i2v_10s"),
+    ],
+)
+def test_omni_first_frame_model_keys(duration, expected):
+    assert _load_model_key(duration, mode="frame_to_video") == expected
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (4, "abra_i2v_4s"),
+        (6, "abra_i2v_6s"),
+        (8, "abra_i2v_8s"),
+        (10, "abra_i2v_10s"),
+    ],
+)
+def test_omni_first_last_model_keys_are_independently_configured(duration, expected):
+    assert _load_model_key(duration, mode="start_end_frame_to_video") == expected
 
 
 def test_invalid_duration_fails_before_submit():
@@ -55,8 +83,7 @@ def test_extract_omni_workflows_uses_primary_media_id():
     ]
 
 
-@pytest.mark.asyncio
-async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
+def _mock_submit_client():
     client = MagicMock()
     client._client_context.return_value = {
         "projectId": "project-1",
@@ -68,10 +95,7 @@ async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
         },
         "sessionId": ";old",
     }
-    client._build_url.return_value = (
-        "https://aisandbox-pa.googleapis.com/"
-        "v1/video:batchAsyncGenerateVideoReferenceImages?key=test"
-    )
+    client._build_url.side_effect = lambda name: f"https://example.test/{name}"
     client._send = AsyncMock(
         return_value={
             "status": 200,
@@ -91,6 +115,97 @@ async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
             },
         }
     )
+    return client
+
+
+@pytest.mark.asyncio
+async def test_submit_builds_flow_omni_first_frame_request_and_poll_descriptor():
+    client = _mock_submit_client()
+
+    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
+        result = await generate_omni_flash_first_frame_video(
+            start_image_media_id="start-1",
+            prompt="Camera slowly pushes in",
+            project_id="project-1",
+            scene_id="scene-1",
+            duration_s=10,
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            user_paygate_tier="PAYGATE_TIER_ONE",
+            seed=321,
+        )
+
+    client._build_url.assert_called_once_with("generate_video")
+    method, params = client._send.await_args.args[:2]
+    assert method == "api_request"
+    assert params["captchaAction"] == "VIDEO_GENERATION"
+
+    body = params["body"]
+    assert body["useV2ModelConfig"] is True
+    assert set(body["mediaGenerationContext"]) == {"batchId"}
+    request = body["requests"][0]
+    assert request["videoModelKey"] == "abra_i2v_10s"
+    assert request["startImage"] == {"mediaId": "start-1"}
+    assert "endImage" not in request
+    assert request["seed"] == 321
+    assert result["data"]["flowkitPolling"]["mode"] == "workflow_media"
+
+
+@pytest.mark.asyncio
+async def test_submit_builds_flow_omni_first_last_request():
+    client = _mock_submit_client()
+
+    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
+        result = await generate_omni_flash_first_last_video(
+            start_image_media_id="start-1",
+            end_image_media_id="end-1",
+            prompt="Move naturally from the first composition to the final composition",
+            project_id="project-1",
+            scene_id="scene-1",
+            duration_s=8,
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
+            user_paygate_tier="PAYGATE_TIER_ONE",
+            seed=456,
+        )
+
+    client._build_url.assert_called_once_with("generate_video_start_end")
+    method, params = client._send.await_args.args[:2]
+    assert method == "api_request"
+    body = params["body"]
+    request = body["requests"][0]
+    assert request["videoModelKey"] == "abra_i2v_8s"
+    assert request["startImage"] == {"mediaId": "start-1"}
+    assert request["endImage"] == {"mediaId": "end-1"}
+    assert request["aspectRatio"] == "VIDEO_ASPECT_RATIO_PORTRAIT"
+    assert request["seed"] == 456
+    assert result["data"]["flowkitPolling"]["workflows"] == [
+        {"name": "workflow-1", "primary_media_id": "media-1"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_first_frame_rejects_missing_start_before_submit():
+    with pytest.raises(ValueError, match="requires start_image_media_id"):
+        await generate_omni_flash_first_frame_video(
+            start_image_media_id="",
+            prompt="test",
+            project_id="p",
+        )
+
+
+@pytest.mark.asyncio
+async def test_first_last_rejects_missing_end_before_submit():
+    with pytest.raises(ValueError, match="non-empty end_image_media_id"):
+        await generate_omni_flash_first_last_video(
+            start_image_media_id="start",
+            end_image_media_id="",
+            prompt="test",
+            project_id="p",
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
+    client = _mock_submit_client()
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await generate_omni_flash_video(
@@ -257,7 +372,7 @@ async def test_submit_rejects_more_than_seven_references():
 
 
 @pytest.mark.asyncio
-async def test_submit_rejects_first_last_style_empty_reference_set():
+async def test_submit_rejects_empty_reference_set():
     with pytest.raises(ValueError, match="requires at least one reference image"):
         await generate_omni_flash_video(
             reference_media_ids=[],
