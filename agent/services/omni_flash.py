@@ -40,6 +40,40 @@ OMNI_FLASH_MAX_REFERENCE_IMAGES = 7
 # Informational only. Flow pricing can be promotional/variable.
 OMNI_FLASH_CREDIT_COST = {4: 15, 6: 20, 8: 25, 10: 30}
 
+# Exact workflow-media fetch contract mirrored from crisng95/flowboard.
+# Do not use FlowClient.get_media() for Omni/workflow polling: that legacy
+# helper appends Google's public API key to the query string, while Flowboard's
+# working workflow-media request intentionally does not.
+_FLOWBOARD_MEDIA_HEADERS = {
+    "content-type": "text/plain;charset=UTF-8",
+    "accept": "*/*",
+    "origin": "https://labs.google",
+    "referer": "https://labs.google/",
+}
+
+
+async def _fetch_workflow_media(client, media_id: str) -> dict:
+    """Fetch workflow-backed media using Flowboard's exact wire contract.
+
+    The browser extension supplies the authenticated Flow Bearer context.
+    The URL query is deliberately limited to ``clientContext.tool=PINHOLE``:
+    no ``key=`` parameter, no project/paygate fields, and no captcha action.
+    """
+    url = (
+        "https://aisandbox-pa.googleapis.com"
+        f"/v1/media/{media_id}?clientContext.tool=PINHOLE"
+    )
+    return await client._send(
+        "api_request",
+        {
+            "url": url,
+            "method": "GET",
+            "headers": dict(_FLOWBOARD_MEDIA_HEADERS),
+            "body": None,
+        },
+        timeout=15,
+    )
+
 
 def _validate_duration(duration_s: int) -> None:
     if duration_s not in OMNI_FLASH_VALID_DURATIONS:
@@ -347,9 +381,10 @@ async def check_omni_flash_status(
 ) -> dict:
     """Perform one non-blocking poll pass for Omni workflow-backed jobs.
 
-    Each workflow is polled via ``GET /v1/media/<primaryMediaId>``. A completed
-    result is only reported once ``video.encodedVideo`` decodes to an MP4
-    (``ftyp`` box present), matching Flow's current workflow behavior.
+    Each workflow is polled using Flowboard's exact unauthenticated-query media
+    URL (browser Bearer auth is supplied by the extension). A completed result
+    is only reported once ``video.encodedVideo`` decodes to an MP4 (``ftyp``
+    box present), matching Flow's workflow behavior.
     """
     normalized = []
     for workflow in workflows or []:
@@ -368,7 +403,7 @@ async def check_omni_flash_status(
     for workflow in normalized:
         name = workflow["name"]
         media_id = workflow["primary_media_id"]
-        response = await client.get_media(media_id)
+        response = await _fetch_workflow_media(client, media_id)
 
         http_status = response.get("status") if isinstance(response, dict) else None
         if isinstance(http_status, int) and http_status >= 400:
