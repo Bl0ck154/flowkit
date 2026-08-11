@@ -15,16 +15,16 @@ without a code release if Google's rollout rotates the wire key.
 Important: Omni submit responses may contain operation-looking handles, but
 those handles are not compatible with the legacy
 ``batchCheckAsyncVideoGenerationStatus`` polling endpoint. Omni jobs are
-workflow-backed and must be polled through ``/v1/media/<primaryMediaId>``.
+workflow-backed and are polled through Flow's authenticated project data.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from agent.services.flow_client import get_flow_client
 from agent.services.headers import random_headers
@@ -40,36 +40,38 @@ OMNI_FLASH_MAX_REFERENCE_IMAGES = 7
 # Informational only. Flow pricing can be promotional/variable.
 OMNI_FLASH_CREDIT_COST = {4: 15, 6: 20, 8: 25, 10: 30}
 
-# Exact workflow-media fetch contract mirrored from crisng95/flowboard.
-# Do not use FlowClient.get_media() for Omni/workflow polling: that legacy
-# helper appends Google's public API key to the query string, while Flowboard's
-# working workflow-media request intentionally does not.
-_FLOWBOARD_MEDIA_HEADERS = {
-    "content-type": "text/plain;charset=UTF-8",
-    "accept": "*/*",
-    "origin": "https://labs.google",
-    "referer": "https://labs.google/",
-}
 
-
-async def _fetch_workflow_media(client, media_id: str) -> dict:
-    """Fetch workflow-backed media using Flowboard's exact wire contract.
-
-    The browser extension supplies the authenticated Flow Bearer context.
-    The URL query is deliberately limited to ``clientContext.tool=PINHOLE``:
-    no ``key=`` parameter, no project/paygate fields, and no captcha action.
-    """
-    url = (
-        "https://aisandbox-pa.googleapis.com"
-        f"/v1/media/{media_id}?clientContext.tool=PINHOLE"
+async def _fetch_project_initial_data(client, project_id: str) -> dict:
+    """Fetch the same authenticated project snapshot used by the Flow UI."""
+    query = quote(
+        json.dumps({"json": {"projectId": project_id}}, separators=(",", ":")),
+        safe="",
     )
+    url = f"https://labs.google/fx/api/trpc/flow.projectInitialData?input={query}"
     return await client._send(
-        "api_request",
+        "trpc_request",
         {
             "url": url,
             "method": "GET",
-            "headers": dict(_FLOWBOARD_MEDIA_HEADERS),
-            "body": None,
+            "headers": {"content-type": "application/json"},
+        },
+        timeout=15,
+    )
+
+
+async def _fetch_media_url(client, media_id: str) -> dict:
+    """Resolve Flow's authenticated media redirect without buffering the file."""
+    url = (
+        "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect"
+        f"?name={quote(media_id, safe='')}"
+    )
+    return await client._send(
+        "trpc_request",
+        {
+            "url": url,
+            "method": "GET",
+            "headers": {"content-type": "application/json"},
+            "responseMode": "url",
         },
         timeout=15,
     )
@@ -158,7 +160,11 @@ def _normalize_workflow(workflow: dict) -> dict | None:
         return None
     if not isinstance(primary_media_id, str) or not primary_media_id:
         return None
-    return {"name": name, "primary_media_id": primary_media_id}
+    item = {"name": name, "primary_media_id": primary_media_id}
+    project_id = workflow.get("project_id") or workflow.get("projectId")
+    if isinstance(project_id, str) and project_id:
+        item["project_id"] = project_id
+    return item
 
 
 def extract_omni_workflows(result: dict) -> list[dict]:
@@ -175,29 +181,21 @@ def extract_omni_workflows(result: dict) -> list[dict]:
     return normalized
 
 
-def _annotate_polling(result: dict) -> dict:
+def _annotate_polling(result: dict, project_id: str) -> dict:
     """Add an explicit FlowKit polling descriptor to a successful submit."""
     workflows = extract_omni_workflows(result)
     if not workflows:
         return result
     data = result.get("data") if isinstance(result.get("data"), dict) else result
     if isinstance(data, dict):
+        for workflow in workflows:
+            workflow["project_id"] = project_id
         data["flowkitPolling"] = {
-            "mode": "workflow_media",
+            "mode": "project_media",
+            "project_id": project_id,
             "workflows": workflows,
         }
     return result
-
-
-def _is_complete_mp4(encoded: str) -> bool:
-    """Flow can expose a small placeholder payload before the final MP4."""
-    if not isinstance(encoded, str) or not encoded:
-        return False
-    try:
-        binary = base64.b64decode(encoded, validate=False)
-    except Exception:
-        return False
-    return len(binary) >= 12 and binary[4:8] == b"ftyp"
 
 
 async def _submit_omni_frame_video(
@@ -264,7 +262,7 @@ async def _submit_omni_frame_video(
         },
         timeout=60,
     )
-    return _annotate_polling(result)
+    return _annotate_polling(result, project_id)
 
 
 async def generate_omni_flash_first_frame_video(
@@ -372,19 +370,19 @@ async def generate_omni_flash_video(
         },
         timeout=60,
     )
-    return _annotate_polling(result)
+    return _annotate_polling(result, project_id)
 
 
 async def check_omni_flash_status(
     workflows: list[dict],
     include_encoded_video: bool = False,
+    project_id: str = "",
 ) -> dict:
     """Perform one non-blocking poll pass for Omni workflow-backed jobs.
 
-    Each workflow is polled using Flowboard's exact unauthenticated-query media
-    URL (browser Bearer auth is supplied by the extension). A completed result
-    is only reported once ``video.encodedVideo`` decodes to an MP4 (``ftyp``
-    box present), matching Flow's workflow behavior.
+    Flow's production UI exposes workflow status through its authenticated
+    ``flow.projectInitialData`` tRPC response. The old ``/v1/media`` transport
+    currently returns ``INVALID_ARGUMENT`` for these workflow media IDs.
     """
     normalized = []
     for workflow in workflows or []:
@@ -397,62 +395,107 @@ async def check_omni_flash_status(
             "(or raw Flow metadata.primaryMediaId)"
         )
 
+    resolved_project_id = project_id or next(
+        (item.get("project_id", "") for item in normalized if item.get("project_id")),
+        "",
+    )
+    if not resolved_project_id:
+        raise ValueError(
+            "Omni project polling requires project_id. Use the project_id returned "
+            "inside flowkitPolling or pass project_id explicitly."
+        )
+    if any(
+        item.get("project_id") and item["project_id"] != resolved_project_id
+        for item in normalized
+    ):
+        raise ValueError(
+            "All Omni workflows in one poll must belong to the same project_id"
+        )
+
     client = get_flow_client()
+    response = await _fetch_project_initial_data(client, resolved_project_id)
+    http_status = response.get("status") if isinstance(response, dict) else None
+    if isinstance(http_status, int) and http_status >= 400:
+        data = response.get("data") if isinstance(response.get("data"), dict) else {}
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
+            error = error.get("message") or error.get("code")
+        raise RuntimeError(
+            error
+            or response.get("error")
+            or f"Flow project poll failed: API_{http_status}"
+        )
+
+    envelope = response.get("data") if isinstance(response, dict) else None
+    result = envelope.get("result") if isinstance(envelope, dict) else None
+    result_data = result.get("data") if isinstance(result, dict) else None
+    project_json = result_data.get("json") if isinstance(result_data, dict) else None
+    contents = project_json.get("projectContents") if isinstance(project_json, dict) else None
+    if not isinstance(contents, dict):
+        raise RuntimeError("Flow project poll returned an unexpected response shape")
+
+    project_workflows = contents.get("workflows")
+    project_media = contents.get("media")
+    project_workflows = project_workflows if isinstance(project_workflows, list) else []
+    project_media = project_media if isinstance(project_media, list) else []
+    known_workflow_names = {
+        item.get("name")
+        for item in project_workflows
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    media_by_id = {
+        item.get("name"): item
+        for item in project_media
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    media_by_workflow = {
+        item.get("workflowId"): item
+        for item in project_media
+        if isinstance(item, dict) and isinstance(item.get("workflowId"), str)
+    }
+
     items = []
 
     for workflow in normalized:
         name = workflow["name"]
         media_id = workflow["primary_media_id"]
-        response = await _fetch_workflow_media(client, media_id)
-
-        http_status = response.get("status") if isinstance(response, dict) else None
-        if isinstance(http_status, int) and http_status >= 400:
-            if http_status == 404:
-                items.append({
-                    "name": name,
-                    "primary_media_id": media_id,
-                    "done": False,
-                    "status": "PENDING",
-                    "error": None,
-                })
-                continue
-            data = response.get("data") if isinstance(response.get("data"), dict) else {}
-            error = data.get("error") if isinstance(data, dict) else None
-            error_message = None
-            if isinstance(error, dict):
-                error_message = error.get("message") or error.get("status")
+        payload = media_by_id.get(media_id) or media_by_workflow.get(name)
+        if not isinstance(payload, dict):
             items.append({
                 "name": name,
                 "primary_media_id": media_id,
-                "done": True,
-                "status": "FAILED",
-                "error": error_message or response.get("error") or f"API_{http_status}",
+                "project_id": resolved_project_id,
+                "done": False,
+                "status": "PENDING",
+                "error": None,
+                "workflow_present": name in known_workflow_names,
             })
             continue
 
-        payload = response.get("data") if isinstance(response, dict) and isinstance(response.get("data"), dict) else response
-        payload = payload if isinstance(payload, dict) else {}
-        video = payload.get("video") if isinstance(payload.get("video"), dict) else {}
-        encoded = video.get("encodedVideo") if isinstance(video, dict) else None
+        metadata = payload.get("mediaMetadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        media_status = metadata.get("mediaStatus")
+        media_status = media_status if isinstance(media_status, dict) else {}
+        generation_status = media_status.get("mediaGenerationStatus")
 
-        media_status = payload.get("mediaMetadata") if isinstance(payload.get("mediaMetadata"), dict) else {}
-        media_status = media_status.get("mediaStatus") if isinstance(media_status.get("mediaStatus"), dict) else {}
-        generation_status = media_status.get("mediaGenerationStatus") if isinstance(media_status, dict) else None
-
-        if isinstance(generation_status, str) and generation_status.endswith("FAILED"):
+        if isinstance(generation_status, str) and (
+            generation_status.endswith("FAILED") or generation_status.endswith("CANCELLED")
+        ):
             items.append({
                 "name": name,
                 "primary_media_id": media_id,
+                "project_id": resolved_project_id,
                 "done": True,
                 "status": "FAILED",
                 "error": generation_status,
             })
             continue
 
-        if not _is_complete_mp4(encoded):
+        if generation_status != "MEDIA_GENERATION_STATUS_SUCCESSFUL":
             items.append({
                 "name": name,
                 "primary_media_id": media_id,
+                "project_id": resolved_project_id,
                 "done": False,
                 "status": "PENDING",
                 "error": None,
@@ -460,28 +503,44 @@ async def check_omni_flash_status(
             continue
 
         url = None
-        if isinstance(video, dict):
-            url = video.get("fifeUrl") or video.get("servingUri")
-        url = url or payload.get("fifeUrl") or payload.get("servingUri")
+        url_error = None
+        url_response = await _fetch_media_url(client, media_id)
+        if isinstance(url_response, dict) and url_response.get("status", 500) < 400:
+            url_data = url_response.get("data")
+            candidate = url_data.get("url") if isinstance(url_data, dict) else None
+            if isinstance(candidate, str) and candidate.startswith("https://flow-content.google/"):
+                url = candidate
+            else:
+                url_error = "Flow media redirect returned no allowed URL"
+        else:
+            url_error = (
+                url_response.get("error")
+                if isinstance(url_response, dict)
+                else "Flow media redirect failed"
+            )
         item = {
             "name": name,
             "primary_media_id": media_id,
+            "project_id": resolved_project_id,
             "done": True,
             "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
             "error": None,
             "media": {
                 "media_id": media_id,
-                "url": url if isinstance(url, str) else None,
-                "encoded_video_available": True,
+                "url": url,
+                "encoded_video_available": False,
             },
         }
         if include_encoded_video:
-            item["media"]["encoded_video"] = encoded
+            item["media"]["encoded_video"] = None
+        if url_error:
+            item["media"]["url_error"] = url_error
         items.append(item)
 
     all_done = bool(items) and all(item["done"] for item in items)
     any_failed = any(item.get("status") == "FAILED" for item in items)
     return {
+        "project_id": resolved_project_id,
         "done": all_done,
         "status": "FAILED" if any_failed else ("COMPLETED" if all_done else "PENDING"),
         "workflows": items,

@@ -1,13 +1,13 @@
 """Unit tests for Gemini Omni Flash Flow submissions and workflow polling."""
 
-import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent.services.omni_flash import (
     OMNI_FLASH_MAX_REFERENCE_IMAGES,
-    _fetch_workflow_media,
+    _fetch_media_url,
+    _fetch_project_initial_data,
     _load_model_key,
     check_omni_flash_status,
     extract_omni_workflows,
@@ -148,7 +148,8 @@ async def test_submit_builds_flow_omni_first_frame_request_and_poll_descriptor()
     assert request["startImage"] == {"mediaId": "start-1"}
     assert "endImage" not in request
     assert request["seed"] == 321
-    assert result["data"]["flowkitPolling"]["mode"] == "workflow_media"
+    assert result["data"]["flowkitPolling"]["mode"] == "project_media"
+    assert result["data"]["flowkitPolling"]["project_id"] == "project-1"
 
 
 @pytest.mark.asyncio
@@ -179,7 +180,11 @@ async def test_submit_builds_flow_omni_first_last_request():
     assert request["aspectRatio"] == "VIDEO_ASPECT_RATIO_PORTRAIT"
     assert request["seed"] == 456
     assert result["data"]["flowkitPolling"]["workflows"] == [
-        {"name": "workflow-1", "primary_media_id": "media-1"}
+        {
+            "name": "workflow-1",
+            "primary_media_id": "media-1",
+            "project_id": "project-1",
+        }
     ]
 
 
@@ -222,9 +227,14 @@ async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
 
     assert result["status"] == 200
     assert result["data"]["flowkitPolling"] == {
-        "mode": "workflow_media",
+        "mode": "project_media",
+        "project_id": "project-1",
         "workflows": [
-            {"name": "workflow-1", "primary_media_id": "media-1"}
+            {
+                "name": "workflow-1",
+                "primary_media_id": "media-1",
+                "project_id": "project-1",
+            }
         ],
     }
     client._build_url.assert_called_once_with("generate_video_references")
@@ -250,92 +260,131 @@ async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
     ]
 
 
+def _project_response(generation_status="MEDIA_GENERATION_STATUS_PENDING", include_media=True):
+    media = []
+    if include_media:
+        media.append(
+            {
+                "name": "media-1",
+                "projectId": "project-1",
+                "workflowId": "workflow-1",
+                "mediaMetadata": {
+                    "mediaStatus": {"mediaGenerationStatus": generation_status}
+                },
+                "video": {"generatedVideo": {"model": "abra_r2v_4s"}},
+            }
+        )
+    return {
+        "status": 200,
+        "data": {
+            "result": {
+                "data": {
+                    "json": {
+                        "projectContents": {
+                            "workflows": [
+                                {
+                                    "name": "workflow-1",
+                                    "projectId": "project-1",
+                                    "metadata": {"primaryMediaId": "media-1"},
+                                }
+                            ],
+                            "media": media,
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+
 @pytest.mark.asyncio
-async def test_workflow_media_fetch_matches_flowboard_wire_contract():
+async def test_project_poll_fetch_matches_live_flow_trpc_contract():
     client = MagicMock()
     client._send = AsyncMock(return_value={"status": 200, "data": {}})
 
-    await _fetch_workflow_media(client, "primary-vid-1")
+    await _fetch_project_initial_data(client, "project-1")
 
     client._send.assert_awaited_once_with(
-        "api_request",
+        "trpc_request",
         {
             "url": (
-                "https://aisandbox-pa.googleapis.com"
-                "/v1/media/primary-vid-1?clientContext.tool=PINHOLE"
+                "https://labs.google/fx/api/trpc/flow.projectInitialData?input="
+                "%7B%22json%22%3A%7B%22projectId%22%3A%22project-1%22%7D%7D"
             ),
             "method": "GET",
-            "headers": {
-                "content-type": "text/plain;charset=UTF-8",
-                "accept": "*/*",
-                "origin": "https://labs.google",
-                "referer": "https://labs.google/",
-            },
-            "body": None,
+            "headers": {"content-type": "application/json"},
         },
         timeout=15,
     )
-    params = client._send.await_args.args[1]
-    assert "key=" not in params["url"]
-    assert "captchaAction" not in params
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_pending_uses_flowboard_media_transport_not_legacy_get_media():
+async def test_media_redirect_fetch_requests_url_only_mode():
     client = MagicMock()
-    client._send = AsyncMock(
-        return_value={
-            "status": 200,
-            "data": {
-                "name": "media-1",
-                "video": {"encodedVideo": ""},
-            },
-        }
+    client._send = AsyncMock(return_value={"status": 200, "data": {}})
+
+    await _fetch_media_url(client, "media-1")
+
+    client._send.assert_awaited_once_with(
+        "trpc_request",
+        {
+            "url": (
+                "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect"
+                "?name=media-1"
+            ),
+            "method": "GET",
+            "headers": {"content-type": "application/json"},
+            "responseMode": "url",
+        },
+        timeout=15,
     )
-    client.get_media = AsyncMock(
-        side_effect=AssertionError("legacy get_media must not be used for workflow polling")
-    )
-    client.check_video_status = AsyncMock(
-        side_effect=AssertionError("legacy operation poll must not be used")
-    )
+
+
+@pytest.mark.asyncio
+async def test_omni_poll_pending_uses_project_snapshot_not_legacy_transports():
+    client = MagicMock()
+    client._send = AsyncMock(return_value=_project_response())
+    client.get_media = AsyncMock(side_effect=AssertionError("legacy get_media forbidden"))
+    client.check_video_status = AsyncMock(side_effect=AssertionError("operation poll forbidden"))
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
-            [{"name": "workflow-1", "primary_media_id": "media-1"}]
+            [
+                {
+                    "name": "workflow-1",
+                    "primary_media_id": "media-1",
+                    "project_id": "project-1",
+                }
+            ]
         )
 
     client.get_media.assert_not_awaited()
     client.check_video_status.assert_not_awaited()
     client._send.assert_awaited_once()
-    params = client._send.await_args.args[1]
-    assert params["url"].endswith(
-        "/v1/media/media-1?clientContext.tool=PINHOLE"
-    )
-    assert "key=" not in params["url"]
     assert result["done"] is False
     assert result["status"] == "PENDING"
     assert result["workflows"][0]["status"] == "PENDING"
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_completed_detects_mp4_without_returning_base64_by_default():
-    mp4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32
-    encoded = base64.b64encode(mp4).decode()
+async def test_omni_poll_completed_returns_signed_url_without_buffering_video():
     client = MagicMock()
     client._send = AsyncMock(
-        return_value={
-            "status": 200,
-            "data": {
-                "name": "media-1",
-                "fifeUrl": "https://example.test/video.mp4",
-                "video": {"encodedVideo": encoded},
+        side_effect=[
+            _project_response("MEDIA_GENERATION_STATUS_SUCCESSFUL"),
+            {
+                "status": 200,
+                "data": {
+                    "url": "https://flow-content.google/video/media-1?Signature=test"
+                },
             },
-        }
+        ]
     )
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
-            [{"name": "workflow-1", "primary_media_id": "media-1"}]
+            [{"name": "workflow-1", "primary_media_id": "media-1"}],
+            project_id="project-1",
         )
 
     assert result["done"] is True
@@ -343,41 +392,32 @@ async def test_omni_poll_completed_detects_mp4_without_returning_base64_by_defau
     item = result["workflows"][0]
     assert item["status"] == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
     assert item["media"]["media_id"] == "media-1"
-    assert item["media"]["url"] == "https://example.test/video.mp4"
-    assert item["media"]["encoded_video_available"] is True
+    assert item["media"]["url"].startswith("https://flow-content.google/video/")
+    assert item["media"]["encoded_video_available"] is False
     assert "encoded_video" not in item["media"]
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_can_return_encoded_video_when_requested():
-    mp4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32
-    encoded = base64.b64encode(mp4).decode()
+async def test_omni_poll_missing_media_is_pending():
     client = MagicMock()
-    client._send = AsyncMock(
-        return_value={"status": 200, "data": {"video": {"encodedVideo": encoded}}}
-    )
+    client._send = AsyncMock(return_value=_project_response(include_media=False))
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
             [{"name": "workflow-1", "primary_media_id": "media-1"}],
-            include_encoded_video=True,
-        )
-
-    assert result["workflows"][0]["media"]["encoded_video"] == encoded
-
-
-@pytest.mark.asyncio
-async def test_omni_poll_404_is_treated_as_not_ready():
-    client = MagicMock()
-    client._send = AsyncMock(return_value={"status": 404, "data": {}})
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await check_omni_flash_status(
-            [{"name": "workflow-1", "primary_media_id": "media-1"}]
+            project_id="project-1",
         )
 
     assert result["done"] is False
     assert result["workflows"][0]["status"] == "PENDING"
+
+
+@pytest.mark.asyncio
+async def test_omni_poll_requires_project_id_for_legacy_descriptors():
+    with pytest.raises(ValueError, match="requires project_id"):
+        await check_omni_flash_status(
+            [{"name": "workflow-1", "primary_media_id": "media-1"}]
+        )
 
 
 @pytest.mark.asyncio

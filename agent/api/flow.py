@@ -75,13 +75,15 @@ class CheckStatusRequest(BaseModel):
     operations: list[dict] = []
     # Omni/workflow-mode callers should pass workflow descriptors instead of
     # operation handles. If workflows is set, /check-status automatically uses
-    # /v1/media/<primaryMediaId> polling.
+    # authenticated Flow project polling.
     workflows: Optional[list[dict]] = None
+    project_id: str = ""
     include_encoded_video: bool = False
 
 
 class CheckOmniStatusRequest(BaseModel):
     workflows: list[dict]
+    project_id: str = ""
     include_encoded_video: bool = False
 
 
@@ -256,9 +258,12 @@ async def check_status(body: CheckStatusRequest):
             return await check_omni_flash_status(
                 body.workflows,
                 include_encoded_video=body.include_encoded_video,
+                project_id=body.project_id,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     if not body.operations:
         raise HTTPException(400, "Provide operations for Veo or workflows for Omni Flash")
@@ -281,9 +286,12 @@ async def check_omni_status(body: CheckOmniStatusRequest):
         return await check_omni_flash_status(
             body.workflows,
             include_encoded_video=body.include_encoded_video,
+            project_id=body.project_id,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 @router.post("/refresh-urls/{project_id}")
