@@ -4,7 +4,10 @@ from pydantic import BaseModel
 from typing import Literal, Optional
 
 from agent.services.flow_client import get_flow_client
-from agent.services.omni_flash import generate_omni_flash_video
+from agent.services.omni_flash import (
+    check_omni_flash_status,
+    generate_omni_flash_video,
+)
 
 router = APIRouter(prefix="/flow", tags=["flow"])
 
@@ -64,7 +67,17 @@ class UploadImageRequest(BaseModel):
 
 
 class CheckStatusRequest(BaseModel):
-    operations: list[dict]
+    operations: list[dict] = []
+    # Omni/workflow-mode callers should pass workflow descriptors instead of
+    # operation handles. If workflows is set, /check-status automatically uses
+    # /v1/media/<primaryMediaId> polling.
+    workflows: Optional[list[dict]] = None
+    include_encoded_video: bool = False
+
+
+class CheckOmniStatusRequest(BaseModel):
+    workflows: list[dict]
+    include_encoded_video: bool = False
 
 
 class EditImageRequest(BaseModel):
@@ -127,6 +140,8 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
     Existing requests default to ``model_family=veo``. Set
     ``model_family=omni_flash`` and ``duration_s`` to 4/6/8/10 to use Omni.
+    Omni responses include ``flowkitPolling.workflows``; poll those workflows,
+    not the operation-looking handles in the raw Flow response.
     """
     client = get_flow_client()
     if not client.connected:
@@ -157,7 +172,11 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
 @router.post("/generate-video-omni")
 async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
-    """Submit Gemini Omni Flash R2V generation (returns operations for polling)."""
+    """Submit Gemini Omni Flash R2V generation.
+
+    The response includes ``flowkitPolling.workflows`` for the correct
+    workflow/media polling path.
+    """
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
@@ -184,14 +203,48 @@ async def upscale_video(body: UpscaleVideoRequest):
 
 @router.post("/check-status")
 async def check_status(body: CheckStatusRequest):
-    """Check video generation status."""
+    """Check Veo operation status or Omni workflow/media status.
+
+    Veo: pass ``operations``.
+    Omni Flash: pass ``workflows`` from submit ``flowkitPolling.workflows``.
+    """
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+
+    if body.workflows:
+        try:
+            return await check_omni_flash_status(
+                body.workflows,
+                include_encoded_video=body.include_encoded_video,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    if not body.operations:
+        raise HTTPException(400, "Provide operations for Veo or workflows for Omni Flash")
+
     result = await client.check_video_status(body.operations)
     if result.get("error"):
         raise HTTPException(502, result["error"])
+    if isinstance(result.get("status"), int) and result["status"] >= 400:
+        raise HTTPException(result["status"], result.get("data", "Flow polling failed"))
     return result.get("data", result)
+
+
+@router.post("/check-omni-status")
+async def check_omni_status(body: CheckOmniStatusRequest):
+    """Poll Gemini Omni Flash jobs via workflow primary media IDs."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    try:
+        return await check_omni_flash_status(
+            body.workflows,
+            include_encoded_video=body.include_encoded_video,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/refresh-urls/{project_id}")
@@ -210,8 +263,8 @@ async def refresh_project_urls(project_id: str):
 async def get_media(media_id: str):
     """Get media metadata + fresh signed URL from Google Flow.
 
-    Returns the raw response which should contain a fresh fifeUrl/servingUri.
-    Use this to refresh expired GCS signed URLs.
+    Returns the raw response which may contain ``video.encodedVideo`` for
+    workflow-backed video generations.
     """
     client = get_flow_client()
     if not client.connected:
