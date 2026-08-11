@@ -7,6 +7,7 @@ import pytest
 
 from agent.services.omni_flash import (
     OMNI_FLASH_MAX_REFERENCE_IMAGES,
+    _fetch_workflow_media,
     _load_model_key,
     check_omni_flash_status,
     extract_omni_workflows,
@@ -250,9 +251,39 @@ async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_pending_uses_media_endpoint_not_legacy_operation_poll():
+async def test_workflow_media_fetch_matches_flowboard_wire_contract():
     client = MagicMock()
-    client.get_media = AsyncMock(
+    client._send = AsyncMock(return_value={"status": 200, "data": {}})
+
+    await _fetch_workflow_media(client, "primary-vid-1")
+
+    client._send.assert_awaited_once_with(
+        "api_request",
+        {
+            "url": (
+                "https://aisandbox-pa.googleapis.com"
+                "/v1/media/primary-vid-1?clientContext.tool=PINHOLE"
+            ),
+            "method": "GET",
+            "headers": {
+                "content-type": "text/plain;charset=UTF-8",
+                "accept": "*/*",
+                "origin": "https://labs.google",
+                "referer": "https://labs.google/",
+            },
+            "body": None,
+        },
+        timeout=15,
+    )
+    params = client._send.await_args.args[1]
+    assert "key=" not in params["url"]
+    assert "captchaAction" not in params
+
+
+@pytest.mark.asyncio
+async def test_omni_poll_pending_uses_flowboard_media_transport_not_legacy_get_media():
+    client = MagicMock()
+    client._send = AsyncMock(
         return_value={
             "status": 200,
             "data": {
@@ -261,15 +292,26 @@ async def test_omni_poll_pending_uses_media_endpoint_not_legacy_operation_poll()
             },
         }
     )
-    client.check_video_status = AsyncMock(side_effect=AssertionError("legacy poll must not be used"))
+    client.get_media = AsyncMock(
+        side_effect=AssertionError("legacy get_media must not be used for workflow polling")
+    )
+    client.check_video_status = AsyncMock(
+        side_effect=AssertionError("legacy operation poll must not be used")
+    )
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
             [{"name": "workflow-1", "primary_media_id": "media-1"}]
         )
 
-    client.get_media.assert_awaited_once_with("media-1")
+    client.get_media.assert_not_awaited()
     client.check_video_status.assert_not_awaited()
+    client._send.assert_awaited_once()
+    params = client._send.await_args.args[1]
+    assert params["url"].endswith(
+        "/v1/media/media-1?clientContext.tool=PINHOLE"
+    )
+    assert "key=" not in params["url"]
     assert result["done"] is False
     assert result["status"] == "PENDING"
     assert result["workflows"][0]["status"] == "PENDING"
@@ -280,7 +322,7 @@ async def test_omni_poll_completed_detects_mp4_without_returning_base64_by_defau
     mp4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32
     encoded = base64.b64encode(mp4).decode()
     client = MagicMock()
-    client.get_media = AsyncMock(
+    client._send = AsyncMock(
         return_value={
             "status": 200,
             "data": {
@@ -311,7 +353,7 @@ async def test_omni_poll_can_return_encoded_video_when_requested():
     mp4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32
     encoded = base64.b64encode(mp4).decode()
     client = MagicMock()
-    client.get_media = AsyncMock(
+    client._send = AsyncMock(
         return_value={"status": 200, "data": {"video": {"encodedVideo": encoded}}}
     )
 
@@ -327,7 +369,7 @@ async def test_omni_poll_can_return_encoded_video_when_requested():
 @pytest.mark.asyncio
 async def test_omni_poll_404_is_treated_as_not_ready():
     client = MagicMock()
-    client.get_media = AsyncMock(return_value={"status": 404, "data": {}})
+    client._send = AsyncMock(return_value={"status": 404, "data": {}})
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
