@@ -1,9 +1,16 @@
 """Gemini Omni Flash video generation through the Google Flow bridge.
 
-Omni Flash is a separate video family from Veo. Google Flow currently
-submits reference-conditioned Omni jobs through
-``batchAsyncGenerateVideoReferenceImages`` using ``abra_r2v_<duration>s``
-model keys.
+Supported Omni surfaces in this module:
+
+* first frame -> video via ``batchAsyncGenerateVideoStartImage``
+* first + last frame -> video via ``batchAsyncGenerateVideoStartAndEndImage``
+* reference images -> video via ``batchAsyncGenerateVideoReferenceImages``
+
+Omni duration-specific model keys live in ``agent/models.json``.  First-frame
+Flow requests have been captured with ``abra_i2v_<duration>s``.  The current
+First+Last rollout uses the same Omni I2V family but the StartAndEnd endpoint;
+that mapping is deliberately configurable separately so it can be changed
+without a code release if Google's rollout rotates the wire key.
 
 Important: Omni submit responses may contain operation-looking handles, but
 those handles are not compatible with the legacy
@@ -34,33 +41,48 @@ OMNI_FLASH_MAX_REFERENCE_IMAGES = 7
 OMNI_FLASH_CREDIT_COST = {4: 15, 6: 20, 8: 25, 10: 30}
 
 
-def _load_model_key(duration_s: int) -> str:
-    """Resolve the configured Omni Flash R2V key for a duration."""
+def _validate_duration(duration_s: int) -> None:
     if duration_s not in OMNI_FLASH_VALID_DURATIONS:
         raise ValueError(
             f"Omni Flash duration {duration_s}s is unsupported; "
             f"choose one of {list(OMNI_FLASH_VALID_DURATIONS)}"
         )
 
-    with open(_MODELS_FILE, encoding="utf-8") as f:
-        models = json.load(f)
 
-    key = (
-        models.get("omni_flash_models", {})
-        .get("reference_to_video", {})
-        .get(str(duration_s))
-    )
-    if not key:
-        raise ValueError(f"No Omni Flash model key configured for {duration_s}s")
-    return key
-
-
-def _validate_inputs(reference_media_ids: list[str], duration_s: int, aspect_ratio: str) -> list[str]:
+def _validate_aspect(aspect_ratio: str) -> None:
     if aspect_ratio not in OMNI_FLASH_VALID_ASPECTS:
         raise ValueError(
             f"Omni Flash aspect ratio {aspect_ratio!r} is unsupported; "
             "use VIDEO_ASPECT_RATIO_PORTRAIT or VIDEO_ASPECT_RATIO_LANDSCAPE"
         )
+
+
+def _load_model_key(duration_s: int, mode: str = "reference_to_video") -> str:
+    """Resolve a configured Omni Flash model key for ``mode`` + duration."""
+    _validate_duration(duration_s)
+
+    with open(_MODELS_FILE, encoding="utf-8") as f:
+        models = json.load(f)
+
+    key = (
+        models.get("omni_flash_models", {})
+        .get(mode, {})
+        .get(str(duration_s))
+    )
+    if not key:
+        raise ValueError(
+            f"No Omni Flash model key configured for mode {mode!r}, {duration_s}s"
+        )
+    return key
+
+
+def _validate_reference_inputs(
+    reference_media_ids: list[str],
+    duration_s: int,
+    aspect_ratio: str,
+) -> list[str]:
+    _validate_duration(duration_s)
+    _validate_aspect(aspect_ratio)
 
     refs = [mid for mid in (reference_media_ids or []) if isinstance(mid, str) and mid]
     if not refs:
@@ -69,13 +91,23 @@ def _validate_inputs(reference_media_ids: list[str], duration_s: int, aspect_rat
         raise ValueError(
             f"Omni Flash accepts at most {OMNI_FLASH_MAX_REFERENCE_IMAGES} reference images"
         )
-
-    if duration_s not in OMNI_FLASH_VALID_DURATIONS:
-        raise ValueError(
-            f"Omni Flash duration {duration_s}s is unsupported; "
-            f"choose one of {list(OMNI_FLASH_VALID_DURATIONS)}"
-        )
     return refs
+
+
+def _validate_frame_inputs(
+    start_image_media_id: str,
+    end_image_media_id: str | None,
+    duration_s: int,
+    aspect_ratio: str,
+) -> None:
+    _validate_duration(duration_s)
+    _validate_aspect(aspect_ratio)
+    if not isinstance(start_image_media_id, str) or not start_image_media_id:
+        raise ValueError("Omni Flash first-frame generation requires start_image_media_id")
+    if end_image_media_id is not None and (
+        not isinstance(end_image_media_id, str) or not end_image_media_id
+    ):
+        raise ValueError("Omni Flash First+Last requires a non-empty end_image_media_id")
 
 
 def _normalize_workflow(workflow: dict) -> dict | None:
@@ -134,6 +166,122 @@ def _is_complete_mp4(encoded: str) -> bool:
     return len(binary) >= 12 and binary[4:8] == b"ftyp"
 
 
+async def _submit_omni_frame_video(
+    *,
+    start_image_media_id: str,
+    end_image_media_id: str | None,
+    prompt: str,
+    project_id: str,
+    scene_id: str = "",
+    duration_s: int = 8,
+    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+    user_paygate_tier: str = "PAYGATE_TIER_ONE",
+    seed: int | None = None,
+) -> dict:
+    """Submit Omni first-frame or First+Last generation."""
+    _validate_frame_inputs(
+        start_image_media_id,
+        end_image_media_id,
+        duration_s,
+        aspect_ratio,
+    )
+
+    mode = (
+        "start_end_frame_to_video"
+        if end_image_media_id is not None
+        else "frame_to_video"
+    )
+    endpoint = (
+        "generate_video_start_end"
+        if end_image_media_id is not None
+        else "generate_video"
+    )
+    model_key = _load_model_key(duration_s, mode=mode)
+    client = get_flow_client()
+    ts = int(time.time() * 1000)
+
+    request_item = {
+        "aspectRatio": aspect_ratio,
+        "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
+        "videoModelKey": model_key,
+        "seed": seed if seed is not None else ts % 1_000_000,
+        "metadata": {"sceneId": scene_id} if scene_id else {},
+        "startImage": {"mediaId": start_image_media_id},
+    }
+    if end_image_media_id is not None:
+        request_item["endImage"] = {"mediaId": end_image_media_id}
+
+    context = client._client_context(project_id, user_paygate_tier)
+    body = {
+        "mediaGenerationContext": {"batchId": str(uuid.uuid4())},
+        "clientContext": {**context, "sessionId": f";{ts}"},
+        "requests": [request_item],
+        "useV2ModelConfig": True,
+    }
+
+    result = await client._send(
+        "api_request",
+        {
+            "url": client._build_url(endpoint),
+            "method": "POST",
+            "headers": random_headers(),
+            "body": body,
+            "captchaAction": "VIDEO_GENERATION",
+        },
+        timeout=60,
+    )
+    return _annotate_polling(result)
+
+
+async def generate_omni_flash_first_frame_video(
+    start_image_media_id: str,
+    prompt: str,
+    project_id: str,
+    scene_id: str = "",
+    duration_s: int = 8,
+    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+    user_paygate_tier: str = "PAYGATE_TIER_ONE",
+    seed: int | None = None,
+) -> dict:
+    """Submit Omni Flash First frame -> video."""
+    return await _submit_omni_frame_video(
+        start_image_media_id=start_image_media_id,
+        end_image_media_id=None,
+        prompt=prompt,
+        project_id=project_id,
+        scene_id=scene_id,
+        duration_s=duration_s,
+        aspect_ratio=aspect_ratio,
+        user_paygate_tier=user_paygate_tier,
+        seed=seed,
+    )
+
+
+async def generate_omni_flash_first_last_video(
+    start_image_media_id: str,
+    end_image_media_id: str,
+    prompt: str,
+    project_id: str,
+    scene_id: str = "",
+    duration_s: int = 8,
+    aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+    user_paygate_tier: str = "PAYGATE_TIER_ONE",
+    seed: int | None = None,
+) -> dict:
+    """Submit Omni Flash First + Last frame -> video."""
+    return await _submit_omni_frame_video(
+        start_image_media_id=start_image_media_id,
+        end_image_media_id=end_image_media_id,
+        prompt=prompt,
+        project_id=project_id,
+        scene_id=scene_id,
+        duration_s=duration_s,
+        aspect_ratio=aspect_ratio,
+        user_paygate_tier=user_paygate_tier,
+        seed=seed,
+    )
+
+
 async def generate_omni_flash_video(
     reference_media_ids: list[str],
     prompt: str,
@@ -150,8 +298,8 @@ async def generate_omni_flash_video(
     the workflow names and primary media IDs required by the Omni polling path.
     Do not feed Omni operation handles to ``check_video_status``.
     """
-    refs = _validate_inputs(reference_media_ids, duration_s, aspect_ratio)
-    model_key = _load_model_key(duration_s)
+    refs = _validate_reference_inputs(reference_media_ids, duration_s, aspect_ratio)
+    model_key = _load_model_key(duration_s, mode="reference_to_video")
     client = get_flow_client()
 
     ts = int(time.time() * 1000)
