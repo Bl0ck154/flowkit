@@ -1,6 +1,6 @@
 # Gemini Omni Flash: integration guide for agents
 
-FlowKit exposes Gemini Omni Flash video generation through the authenticated Google Flow session in its persistent Chrome profile. An integrating service talks only to the FlowKit REST API; it must not call Google Flow endpoints or the extension WebSocket directly.
+FlowKit exposes Gemini Omni Flash video generation through an authenticated Google Flow Chrome profile. Chrome may run on demand while the API agent remains online. An integrating service talks only to the FlowKit REST API; it must not call Google Flow endpoints or the extension WebSocket directly.
 
 ## Prerequisites and base URL
 
@@ -17,6 +17,10 @@ Expected state:
 {"status":"ok","extension_connected":true}
 {"connected":true,"flow_key_present":true}
 ```
+
+If production Chrome is intentionally offline, start it with
+`flowkit-chrome start` and wait for these checks before submitting. See
+[ON_DEMAND_CHROME.md](ON_DEMAND_CHROME.md).
 
 Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remote integration, set `FLOWKIT_BASE_URL` to the protected HTTPS reverse-proxy URL and allow only the required source IPs or private network. Do not expose Chrome, VNC/noVNC, the extension WebSocket, or port 8100 publicly.
 
