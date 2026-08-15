@@ -213,6 +213,25 @@ curl http://127.0.0.1:8100/health
 # {"status":"ok","extension_connected":true}
 ```
 
+### Production: run Chrome on demand
+
+The API agent and its SQLite queue can stay online while Chrome is stopped.
+Install the helper and disable Chrome at boot:
+
+```bash
+sudo install -m 755 scripts/flowkit-chrome.sh /usr/local/bin/flowkit-chrome
+sudo systemctl disable --now flowkit-chrome.service
+
+flowkit-chrome start
+flowkit-chrome status
+flowkit-chrome stop
+```
+
+Queued jobs wait for the extension to reconnect. Direct `/api/flow/*` calls
+return HTTP 503 while Chrome is offline. The helper refuses a normal stop while
+a request is `PROCESSING`; see [the on-demand runbook](docs/ON_DEMAND_CHROME.md)
+for recovery and forced-stop instructions.
+
 ## End-to-End Example: "Pippip the Fish Merchant"
 
 A chubby cat sells fish at a market. 3 scenes, vertical, Pixar 3D style.
