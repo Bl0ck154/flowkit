@@ -10,6 +10,7 @@ from agent.services.omni_flash import (
     generate_omni_flash_first_last_video,
     generate_omni_flash_video,
 )
+from agent.services.upscale_polling import annotate_upscale_polling
 
 router = APIRouter(prefix="/flow", tags=["flow"])
 
@@ -232,13 +233,14 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
 
 @router.post("/upscale-video")
 async def upscale_video(body: UpscaleVideoRequest):
-    """Submit video upscale (returns operations for polling)."""
+    """Submit video upscale and attach the headless polling descriptor."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
     result = await client.upscale_video(**body.model_dump())
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
+    result = annotate_upscale_polling(result)
     return result.get("data", result)
 
 
