@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Literal, Optional
 
+from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
 from agent.services.flow_client import get_flow_client
 from agent.services.browser_session import ensure_flow_session, inspect_flow_session
 from agent.services.omni_flash import (
@@ -98,26 +99,22 @@ class EditImageRequest(BaseModel):
 
 @router.get("/status")
 async def extension_status():
-    """Report the real browser Flow session separately from legacy bearer auth."""
+    """Report transport state and the real signed-in Flow browser session."""
     client = get_flow_client()
     session = await inspect_flow_session() if client.connected else {}
-
     signed_in = bool(session.get("signedIn")) if isinstance(session, dict) else False
-    flow_tab_present = bool(session.get("flowTabPresent")) if isinstance(session, dict) else False
-    session_state = session.get("state") if isinstance(session, dict) else None
-
     return {
         "connected": client.connected,
+        "transport": "batch" if USE_BATCH_RPC else "legacy_rest",
+        "flow_project_id": FLOW_PROJECT_ID or None,
+        "allow_degraded": FLOW_ALLOW_DEGRADED,
         "authenticated": signed_in,
-        "auth_state": "AUTHENTICATED" if signed_in else (session_state or "UNKNOWN"),
-        "flow_tab_present": flow_tab_present,
-        "at_token_present": bool(session.get("atTokenPresent")) if isinstance(session, dict) else False,
-        # Compatibility field only. Google Flow no longer reliably mints this
-        # bearer on the current flow.google.com transport.
+        "auth_state": "AUTHENTICATED" if signed_in else session.get("state", "UNKNOWN"),
+        "flow_tab_present": bool(session.get("flowTabPresent")),
+        "at_token_present": bool(session.get("atTokenPresent")),
+        "session_url": session.get("url"),
         "flow_key_present": client._flow_key is not None,
-        "legacy_flow_key_present": client._flow_key is not None,
-        "legacy_flow_key_authoritative": False,
-        "session_url": session.get("url") if isinstance(session, dict) else None,
+        "legacy_flow_key_authoritative": not USE_BATCH_RPC,
     }
 
 
@@ -141,31 +138,14 @@ async def ensure_session():
 
 @router.get("/credits")
 async def get_credits():
-    """Get credits without misclassifying the new Flow browser session as signed out."""
+    """Get user credits from Google Flow."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-
     result = await client.get_credits()
-    data = result.get("data", result) if isinstance(result, dict) else result
-    nested_error = data.get("error") if isinstance(data, dict) else None
-    error_code = nested_error.get("code") if isinstance(nested_error, dict) else None
-    status_code = result.get("status") if isinstance(result, dict) else None
-
-    if error_code == 401 or status_code == 401:
-        session = await inspect_flow_session()
-        if isinstance(session, dict) and session.get("signedIn"):
-            return {
-                "credits_available": False,
-                "browser_session_authenticated": True,
-                "auth_state": "AUTHENTICATED",
-                "legacy_credits_endpoint_available": False,
-                "note": "Google Flow browser session is valid; the legacy bearer credits endpoint is no longer authoritative.",
-            }
-
-    if isinstance(result, dict) and result.get("error"):
+    if result.get("error"):
         raise HTTPException(502, result["error"])
-    return data
+    return result.get("data", result)
 
 
 @router.post("/generate-image")
