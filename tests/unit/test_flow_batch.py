@@ -121,6 +121,23 @@ class TestVideoRequest:
         crop = [None, 0.1, 1, 0.9]
         assert inner(fb.video_request("go", self.PID, "mid", crop=crop))[0][0][4][5] == crop
 
+    def test_text_video_matches_the_captured_yhhmef_shape(self):
+        payload = inner(fb.text_video_request(
+            "a boat",
+            self.PID,
+            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            model="abra_t2v_4s",
+        ))
+        request = payload[0][0]
+        assert request[0] == [None, None, [[["a boat"]]]]
+        assert request[1] == "abra_t2v_4s"
+        assert request[2] == fb.VIDEO_ASPECT_LANDSCAPE
+        assert request[3] is None
+        assert len(request[4]) == 6
+        assert payload[1][5] == self.PID
+        assert payload[2][1] == 1
+        assert fb.CAPTCHA_SLOT in json.dumps(payload)
+
     def test_upscale_matches_the_captured_1080p_slots(self):
         payload = inner(fb.upscale_request(
             "media-1", self.PID,
@@ -149,6 +166,16 @@ class TestReaders:
     def test_a_repeated_url_is_not_a_second_variant(self):
         url = f"https://{fb.MEDIA_HOST}/image/{self.MID}?sig=x"
         assert len(fb.read_images([url, url])) == 1
+
+    def test_text_video_submit_reads_media_and_workflow_ids(self):
+        payload = [None, 10, [], [[self.MID, "project-1", self.OP, "CAE"]]]
+        submitted = fb.read_text_video_submit(payload)
+        assert submitted == {
+            "media_id": self.MID,
+            "project_id": "project-1",
+            "workflow_id": self.OP,
+            "status": "CAE",
+        }
 
     def test_upscale_submit_reads_the_new_media_id(self):
         assert fb.read_upscaled_media_id([[self.MID + "_upsampled"]]) == self.MID + "_upsampled"

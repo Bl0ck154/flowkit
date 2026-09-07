@@ -11,45 +11,62 @@ curl -fsS "$FLOWKIT_BASE_URL/health"
 curl -fsS "$FLOWKIT_BASE_URL/api/flow/status"
 ```
 
-Expected state:
+Expected state on the migrated Flow transport:
 
 ```json
 {"status":"ok","extension_connected":true}
-{"connected":true,"flow_key_present":true}
+{"connected":true,"transport":"batch","authenticated":true,"at_token_present":true}
 ```
 
 Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remote integration, set `FLOWKIT_BASE_URL` to the protected HTTPS reverse-proxy URL and allow only the required source IPs or private network. Do not expose Chrome, VNC/noVNC, the extension WebSocket, or port 8100 publicly.
 
 ## Supported modes
 
-| Mode | Inputs | Endpoint | Internal model family |
-|---|---|---|---|
-| First frame to video | one uploaded start image | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` |
-| First + Last frame to video | uploaded start and end images | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` |
-| References to video | 1-7 uploaded reference images | `POST /api/flow/generate-video-omni` | `abra_r2v_<duration>s` |
+On the current `flow.google.com` batch transport, Omni **text-to-video** is live and verified. The older frame/reference implementations below still depend on the pre-migration REST transport and are deliberately refused while `USE_BATCH_RPC=1`.
 
-Supported durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ratios are:
+| Mode | Batch status | Endpoint | Internal model family |
+|---|---|---|---|
+| Text to video | **supported** | `POST /api/flow/generate-video-omni-text` | `abra_t2v_<duration>s` |
+| First frame to video | not yet ported | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` (legacy only) |
+| First + Last frame to video | not yet ported | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` (legacy only) |
+| References to video | not yet ported | `POST /api/flow/generate-video-omni` | `abra_r2v_<duration>s` (legacy only) |
+
+Text-to-video durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ratios are:
 
 - `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`)
 - `VIDEO_ASPECT_RATIO_LANDSCAPE` (`16:9`)
 
-First + Last generation with `batchAsyncGenerateVideoStartAndEndImage` and the current `abra_i2v_*` mapping has been verified with a real Flow generation.
+The migrated `YhhmEf` wire was live-verified with `abra_t2v_4s`; the downloaded result was exactly 4.000 seconds at 1280x720/24 fps. Poll migrated Omni media through `/api/flow/check-omni-status`, which resolves the finished MP4 with `as29s`.
 
 ## End-to-end integration flow
 
-An integration agent should implement this state machine:
+For the current migrated text-to-video path, an integration agent should implement this state machine:
 
 1. Check `/health` and `/api/flow/status`.
-2. Make each source image readable on the FlowKit server.
-3. Call `/api/flow/upload-image` for every source image and retain each returned `media_id`.
-4. Submit exactly one Omni request and persist its complete `flowkitPolling` object.
-5. Poll `/api/flow/check-omni-status` every 10-20 seconds using `project_id` and `workflows` from `flowkitPolling`.
-6. On `PENDING`, continue polling. On `FAILED`, stop and report the returned error. On `COMPLETED`, immediately download every non-null `media.url`.
-7. Store the downloaded video in the project's own durable storage. The returned Google URL is signed and short-lived.
+2. Call `POST /api/flow/generate-video-omni-text` with the prompt, Flow project ID, duration and aspect ratio.
+3. Persist the complete `flowkitPolling` object returned by the submit.
+4. Poll `/api/flow/check-omni-status` every 10-20 seconds using `project_id` and `workflows` from `flowkitPolling`.
+5. On `PENDING`, continue polling. On `FAILED`, stop and report the returned error. On `COMPLETED`, immediately download every non-null `media.url`.
+6. Store the downloaded video in the project's own durable storage. The returned Google URL is signed and short-lived.
+
+Example 4-second submit:
+
+```bash
+curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video-omni-text" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "prompt": "A small red paper boat gently drifts across a calm pond",
+    "project_id": "FLOW_PROJECT_ID",
+    "duration_s": 4,
+    "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE"
+  }'
+```
 
 Do not send Omni workflow names to the legacy Veo `batchCheckAsyncVideoGenerationStatus` operation poller. Do not use the obsolete `/v1/media/<primaryMediaId>` polling path.
 
 ## Supplying images
+
+This section applies to the older frame/reference Omni modes. Those generation modes are currently refused on `USE_BATCH_RPC=1` until their migrated payloads are captured; image upload itself may still be used by supported Veo workflows.
 
 `POST /api/flow/upload-image` is not a multipart upload endpoint. Its `file_path` is an absolute path on the **FlowKit server**, not on the calling server.
 
