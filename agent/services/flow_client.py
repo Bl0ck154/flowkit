@@ -29,6 +29,7 @@ from agent.config import (
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
+from agent.services.browser_session import run_flow_batch_rpc
 from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,9 @@ class FlowClient:
         self._operation_projects: dict[str, str] = {}
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
+        # Last project resolved for a batchexecute request. The direct-CDP
+        # runner uses it to keep Chrome on the matching Flow project page.
+        self._batch_active_project: Optional[str] = None
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -488,12 +492,18 @@ class FlowClient:
         is tens of megabytes for the one entry we want, and the cheapest place
         to throw the rest away is inside the tab.
         """
-        params: dict = {"rpcid": rpcid, "freq": freq}
-        if captcha_action:
-            params["captchaAction"] = captcha_action
-        if match:
-            params["match"] = match
-        return await self._send("batch_rpc", params, timeout=timeout)
+        # Run in the signed-in Flow page through Chrome DevTools. This keeps
+        # the new transport independent of which MV3 package version Chrome
+        # currently has installed; the extension remains responsible for the
+        # legacy bridge and telemetry, while cookies/CSRF/reCAPTCHA stay in-page.
+        return await run_flow_batch_rpc(
+            rpcid,
+            freq,
+            captcha_action=captcha_action,
+            match=match,
+            project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+            timeout=timeout,
+        )
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
@@ -512,8 +522,11 @@ class FlowClient:
         the pinned FLOW_PROJECT_ID.
         """
         if project_id and self._UUID_RE.match(str(project_id)):
-            return str(project_id)
+            resolved = str(project_id)
+            self._batch_active_project = resolved
+            return resolved
         if FLOW_PROJECT_ID:
+            self._batch_active_project = FLOW_PROJECT_ID
             return FLOW_PROJECT_ID
         raise fb.FlowBatchError(
             "NO_FLOW_PROJECT: every batchexecute call is scoped to a Flow project. "
