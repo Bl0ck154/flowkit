@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Literal, Optional
 
 from agent.services.flow_client import get_flow_client
+from agent.services.browser_session import ensure_flow_session, inspect_flow_session
 from agent.services.omni_flash import (
     check_omni_flash_status,
     generate_omni_flash_first_frame_video,
@@ -97,24 +98,74 @@ class EditImageRequest(BaseModel):
 
 @router.get("/status")
 async def extension_status():
-    """Check if extension is connected."""
+    """Report the real browser Flow session separately from legacy bearer auth."""
     client = get_flow_client()
+    session = await inspect_flow_session() if client.connected else {}
+
+    signed_in = bool(session.get("signedIn")) if isinstance(session, dict) else False
+    flow_tab_present = bool(session.get("flowTabPresent")) if isinstance(session, dict) else False
+    session_state = session.get("state") if isinstance(session, dict) else None
+
     return {
         "connected": client.connected,
+        "authenticated": signed_in,
+        "auth_state": "AUTHENTICATED" if signed_in else (session_state or "UNKNOWN"),
+        "flow_tab_present": flow_tab_present,
+        "at_token_present": bool(session.get("atTokenPresent")) if isinstance(session, dict) else False,
+        # Compatibility field only. Google Flow no longer reliably mints this
+        # bearer on the current flow.google.com transport.
         "flow_key_present": client._flow_key is not None,
+        "legacy_flow_key_present": client._flow_key is not None,
+        "legacy_flow_key_authoritative": False,
+        "session_url": session.get("url") if isinstance(session, dict) else None,
+    }
+
+
+@router.post("/ensure-session")
+async def ensure_session():
+    """Reopen/reload Flow in the persistent Google profile and re-check login."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    session = await ensure_flow_session()
+    return {
+        "authenticated": bool(session.get("signedIn")),
+        "auth_state": session.get("state", "UNKNOWN"),
+        "recovered": bool(session.get("recovered")),
+        "flow_tab_present": bool(session.get("flowTabPresent")),
+        "at_token_present": bool(session.get("atTokenPresent")),
+        "session_url": session.get("url"),
+        "interactive_login_required": session.get("state") == "INTERACTIVE_LOGIN_REQUIRED",
     }
 
 
 @router.get("/credits")
 async def get_credits():
-    """Get user credits from Google Flow."""
+    """Get credits without misclassifying the new Flow browser session as signed out."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+
     result = await client.get_credits()
-    if result.get("error"):
+    data = result.get("data", result) if isinstance(result, dict) else result
+    nested_error = data.get("error") if isinstance(data, dict) else None
+    error_code = nested_error.get("code") if isinstance(nested_error, dict) else None
+    status_code = result.get("status") if isinstance(result, dict) else None
+
+    if error_code == 401 or status_code == 401:
+        session = await inspect_flow_session()
+        if isinstance(session, dict) and session.get("signedIn"):
+            return {
+                "credits_available": False,
+                "browser_session_authenticated": True,
+                "auth_state": "AUTHENTICATED",
+                "legacy_credits_endpoint_available": False,
+                "note": "Google Flow browser session is valid; the legacy bearer credits endpoint is no longer authoritative.",
+            }
+
+    if isinstance(result, dict) and result.get("error"):
         raise HTTPException(502, result["error"])
-    return result.get("data", result)
+    return data
 
 
 @router.post("/generate-image")

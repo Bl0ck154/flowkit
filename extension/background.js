@@ -5,9 +5,18 @@
  * Captures bearer token, solves reCAPTCHA, proxies API calls through browser.
  */
 
-const AGENT_WS_URL = 'ws://127.0.0.1:9222';
+const AGENT_WS_URL = 'ws://127.0.0.1:9223';
 // NOTE: This is a browser-restricted public API key — safe to ship in extension bundles.
 const API_KEY = 'AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY';
+
+// Current Flow lives on flow.google.com. The old labs.google URLs are kept
+// because existing pinned project tabs may still be open there.
+const flowUrls = [
+  'https://flow.google.com/*',
+  'https://labs.google/fx/tools/flow*',
+  'https://labs.google/fx/*/tools/flow*',
+];
+const FLOW_TAB_URL = 'https://flow.google.com/';
 
 let ws = null;
 let flowKey = null;
@@ -62,9 +71,16 @@ function broadcastRequestLog() {
 
 // ─── Startup ────────────────────────────────────────────────
 
-chrome.runtime.onInstalled.addListener(init);
-chrome.runtime.onStartup.addListener(init);
+let initializationPromise = null;
+
+chrome.runtime.onInstalled.addListener(() => {
+  void ensureInitialized();
+});
+chrome.runtime.onStartup.addListener(() => {
+  void ensureInitialized();
+});
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  await ensureInitialized();
   if (alarm.name === 'reconnect') connectToAgent();
   if (alarm.name === 'keepAlive') keepAlive();
   if (alarm.name === 'token-refresh') {
@@ -72,7 +88,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
-async function init() {
+function ensureInitialized() {
+  if (!initializationPromise) {
+    initializationPromise = initialize().catch((error) => {
+      initializationPromise = null;
+      console.error('[FlowAgent] Initialization failed', error);
+      throw error;
+    });
+  }
+  return initializationPromise;
+}
+
+async function initialize() {
   const data = await chrome.storage.local.get(['flowKey', 'metrics', 'callbackSecret']);
   if (data.flowKey) flowKey = data.flowKey;
   if (data.metrics) Object.assign(metrics, data.metrics);
@@ -80,6 +107,10 @@ async function init() {
   connectToAgent();
   chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
 }
+
+// MV3 workers can be suspended and restarted without onStartup firing.
+// Rehydrate the persisted Flow key on every worker start.
+void ensureInitialized();
 
 // ─── Token Capture ──────────────────────────────────────────
 
@@ -158,6 +189,62 @@ async function captureTokenFromFlowTab() {
 
 // ─── WebSocket to Agent ─────────────────────────────────────
 
+async function inspectFlowSession() {
+  const tabs = await chrome.tabs.query({ url: flowUrls });
+  if (!tabs.length) {
+    return {
+      flowTabPresent: false,
+      signedIn: false,
+      atTokenPresent: false,
+      state: 'NO_FLOW_TAB',
+    };
+  }
+
+  let last = null;
+  for (const tab of tabs) {
+    try {
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'MAIN',
+        func: () => {
+          const at = window.WIZ_global_data?.SNlM0e;
+          const url = window.location.href;
+          return {
+            url,
+            atTokenPresent: typeof at === 'string' && at.length > 0,
+            onAccountsPage: url.includes('accounts.google.com'),
+          };
+        },
+      });
+      const page = injected?.[0]?.result || {};
+      const signedIn = !!page.atTokenPresent && !page.onAccountsPage;
+      const result = {
+        flowTabPresent: true,
+        signedIn,
+        atTokenPresent: !!page.atTokenPresent,
+        state: signedIn ? 'AUTHENTICATED' : 'FLOW_SESSION_UNAVAILABLE',
+        url: page.url || tab.url || null,
+      };
+      if (signedIn) return result;
+      last = result;
+    } catch (e) {
+      last = {
+        flowTabPresent: true,
+        signedIn: false,
+        atTokenPresent: false,
+        state: 'FLOW_TAB_UNREADABLE',
+        error: e?.message || String(e),
+      };
+    }
+  }
+  return last || {
+    flowTabPresent: true,
+    signedIn: false,
+    atTokenPresent: false,
+    state: 'FLOW_SESSION_UNAVAILABLE',
+  };
+}
+
 function connectToAgent() {
   if (manualDisconnect) return;
   if (ws?.readyState === WebSocket.CONNECTING) return;
@@ -200,6 +287,9 @@ function connectToAgent() {
         await handleTrpcRequest(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
+      } else if (msg.method === 'get_session_status') {
+        const session = await inspectFlowSession();
+        sendToAgent({ id: msg.id, result: session });
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,

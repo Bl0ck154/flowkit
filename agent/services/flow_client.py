@@ -320,7 +320,10 @@ class FlowClient:
         if not self.connected:
             return {"error": "Extension not connected"}
 
-        extension_candidates = self._extension_candidates(require_token=True)
+        # Browser-session diagnostics do not depend on the legacy ya29 bearer.
+        # All legacy REST/tRPC proxy calls still require it.
+        require_token = method != "get_session_status"
+        extension_candidates = self._extension_candidates(require_token=require_token)
         if not extension_candidates:
             return {"error": "NO_FLOW_KEY"}
 
@@ -638,8 +641,15 @@ class FlowClient:
             "body": body,
         }, timeout=30)  # No captcha needed
 
+    async def get_session_status(self) -> dict:
+        """Inspect the signed-in Google Flow browser session without using bearer auth."""
+        result = await self._send("get_session_status", {}, timeout=10)
+        if isinstance(result, dict) and isinstance(result.get("result"), dict):
+            return result["result"]
+        return result if isinstance(result, dict) else {"error": "Invalid session status response"}
+
     async def get_credits(self) -> dict:
-        """Get user credits and tier."""
+        """Get user credits and tier through the legacy REST transport."""
         url = self._build_url("get_credits")
         return await self._send("api_request", {
             "url": url,
