@@ -29,7 +29,7 @@ from agent.config import (
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
-from agent.services.browser_session import run_flow_batch_rpc
+from agent.services.browser_session import inspect_flow_session, run_flow_batch_rpc
 from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
@@ -525,6 +525,8 @@ class FlowClient:
             resolved = str(project_id)
             self._batch_active_project = resolved
             return resolved
+        if self._batch_active_project and self._UUID_RE.match(self._batch_active_project):
+            return self._batch_active_project
         if FLOW_PROJECT_ID:
             self._batch_active_project = FLOW_PROJECT_ID
             return FLOW_PROJECT_ID
@@ -707,14 +709,51 @@ class FlowClient:
 
     async def upscale_video(self, media_id: str, scene_id: str,
                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                             resolution: str = "VIDEO_RESOLUTION_4K") -> dict:
-        """Upscale a video."""
+                             resolution: str = "VIDEO_RESOLUTION_4K",
+                             project_id: str | None = None) -> dict:
+        """Upscale/export a video using Flow's migrated p0UkFb RPC."""
         if not USE_BATCH_RPC:
             return await self._legacy_upscale_video(media_id, scene_id, aspect_ratio, resolution)
-        return {"error": _unsupported(
-            "video upscale",
-            "no upsampler rpc appears in the new frontend's captures",
-        )}
+
+        model = UPSCALE_MODELS.get(resolution)
+        if not model:
+            return {"status": 400, "error": f"Unsupported upscale resolution: {resolution}"}
+
+        try:
+            requested_project = project_id or self._batch_active_project or FLOW_PROJECT_ID
+            if not requested_project:
+                session = await inspect_flow_session()
+                url = session.get("url", "") if isinstance(session, dict) else ""
+                if "/project/" in url:
+                    candidate = url.split("/project/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+                    if self._UUID_RE.match(candidate):
+                        requested_project = candidate
+            pid = self._batch_project_id(requested_project or "")
+            freq = fb.upscale_request(
+                media_id,
+                pid,
+                aspect=aspect_ratio,
+                model=model,
+            )
+            payload = await self._batch_payload(
+                fb.RPC_UPSCALE,
+                freq,
+                fb.CAPTCHA_VIDEO,
+                timeout=120,
+            )
+            upscaled_media_id = fb.read_upscaled_media_id(payload)
+        except Exception as e:
+            return _batch_error(e)
+
+        workflow = {
+            "name": upscaled_media_id,
+            "primary_media_id": upscaled_media_id,
+            "project_id": pid,
+        }
+        return {"status": 200, "data": {
+            "media": [{"name": upscaled_media_id}],
+            "workflows": [workflow],
+        }}
 
     async def check_video_status(self, operations: list[dict]) -> dict:
         """One poll round for each submitted operation.

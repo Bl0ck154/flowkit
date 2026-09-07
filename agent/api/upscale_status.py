@@ -16,6 +16,7 @@ class ExportVideoRequest(BaseModel):
     scene_id: str = "export"
     quality: Literal["1080p", "4k"] = "1080p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    project_id: str | None = None
 
 
 class CheckExportStatusRequest(BaseModel):
@@ -45,6 +46,7 @@ async def export_video(body: ExportVideoRequest):
         scene_id=body.scene_id,
         aspect_ratio=body.aspect_ratio,
         resolution=resolution,
+        project_id=body.project_id,
     )
     if result.get("error") or (
         isinstance(result.get("status"), int) and result["status"] >= 400

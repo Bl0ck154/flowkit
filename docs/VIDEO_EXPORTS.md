@@ -23,7 +23,7 @@ curl -sS -X POST http://127.0.0.1:8100/api/flow/export-video \
   }'
 ```
 
-`quality` defaults to `1080p`. `4k` remains available explicitly.
+`quality` defaults to `1080p`. `4k` remains an explicit API option, but it is plan-gated by Google Flow; the currently verified account exposes 4K as disabled while 1080p is available.
 
 The response contains `flowkitPolling.workflows`. Poll those descriptors:
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+from agent.config import USE_BATCH_RPC
 from agent.services.flow_client import get_flow_client
 
 _ALLOWED_MEDIA_URL_PREFIX = "https://flow-content.google/"
@@ -61,6 +62,20 @@ def annotate_upscale_polling(result: dict) -> dict:
 
 
 async def _fetch_media_url(client, media_id: str) -> dict:
+    if USE_BATCH_RPC:
+        result = await client.get_media(media_id)
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        video = data.get("video") if isinstance(data, dict) else None
+        candidate = video.get("fifeUrl") if isinstance(video, dict) else None
+        return {
+            "status": result.get("status", 200),
+            "data": {
+                "url": candidate,
+                "contentType": "video/mp4" if candidate else None,
+            },
+            "error": result.get("error"),
+        }
+
     url = (
         "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect"
         f"?name={quote(media_id, safe='')}"
@@ -126,7 +141,7 @@ async def check_upscale_status(
                 "media_id": media_id,
                 "url": url,
                 "encoded_video_available": False,
-                "resolved_via": "media.getMediaUrlRedirect",
+                "resolved_via": "as29s" if USE_BATCH_RPC else "media.getMediaUrlRedirect",
             }
             if content_type:
                 media["content_type"] = content_type
