@@ -42,11 +42,23 @@ curl -fsS -X POST http://127.0.0.1:8100/api/flow/generate-image \
 
 `image_model` may be a friendly configured alias or an exact Flow wire id.
 `count` is `1..4`, matching the current Flow UI. FlowKit mirrors the UI exactly:
-`count=N` dispatches N independent `ogiZ0b` requests concurrently, so every
-image gets its own single-use reCAPTCHA token. This matters for Nano Banana Pro,
-which rejects the unofficial multi-item-in-one-RPC shape tolerated by Lite. An
-optional `seed` makes the first request reproducible; subsequent variants use a
-deterministic seed stride. `reference_media_ids` is the generic name for image
+`count=N` dispatches N independent `ogiZ0b` requests, so every image gets its
+own single-use reCAPTCHA token. FlowKit mirrors the current Flow UI launch
+cadence (captured x4 at roughly 0.0 / 0.5 / 1.5 / 2.5 seconds) instead of
+bursting every request at once; the generations still run concurrently after
+submission. This matters for Nano Banana Pro, which rejects the unofficial
+multi-item-in-one-RPC shape tolerated by Lite and is more prone to transient RPC
+`[8]` failures under an artificial burst. FlowKit treats only image RPC `[8]` as
+transient and retries that variant once after a 34-second cooldown; shorter
+retries were still rejected in live testing. Other RPC errors fail immediately.
+This retry is a FlowKit resilience policy, not a claim that Flow's UI performs
+the same automatic retry. The retry starts only after the entire first wave has
+settled, so it does not collide with still-running variants. If a multi-image
+request still has a failed variant after retry, successful images are preserved
+and the response includes `complete=false`, `generated_count`, and
+`failed_variants` instead of discarding the whole batch. An optional `seed` makes
+the first request reproducible; subsequent variants use a deterministic seed stride.
+`reference_media_ids` is the generic name for image
 references; the older `character_media_ids` field remains accepted and the two
 lists are de-duplicated.
 
