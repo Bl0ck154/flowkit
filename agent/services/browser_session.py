@@ -22,6 +22,45 @@ def _http_json(url: str, method: str = "GET") -> object:
         return json.loads(response.read().decode("utf-8"))
 
 
+
+
+def _http_text(url: str, method: str = "GET") -> str:
+    req = urllib.request.Request(url, method=method)
+    with urllib.request.urlopen(req, timeout=5) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _redundant_flow_root_ids(targets: list[dict], keep_target_id: str | None = None) -> list[str]:
+    """Exact-root Flow tabs are disposable once a project signer tab exists."""
+    has_project = any(
+        t.get("type") == "page"
+        and isinstance(t.get("url"), str)
+        and "/project/" in t["url"]
+        for t in targets
+    )
+    if not has_project:
+        return []
+    return [
+        t["id"] for t in targets
+        if t.get("type") == "page"
+        and t.get("id") != keep_target_id
+        and t.get("url") == FLOW_URL
+        and t.get("id")
+    ]
+
+
+async def _prune_redundant_flow_roots(targets: list[dict], keep_target_id: str | None = None) -> int:
+    """Close stale Flow home tabs without touching project signer tabs."""
+    closed = 0
+    for target_id in _redundant_flow_root_ids(targets, keep_target_id):
+        try:
+            await asyncio.to_thread(_http_text, f"{CDP_BASE}/json/close/{target_id}")
+            closed += 1
+        except Exception:
+            # Cleanup must never make a generation fail.
+            continue
+    return closed
+
 async def _targets() -> list[dict]:
     try:
         data = await asyncio.to_thread(_http_json, f"{CDP_BASE}/json")
@@ -227,6 +266,9 @@ async def run_flow_batch_rpc(
     if target is None:
         target = flow_targets[0] if flow_targets else None
 
+    if target is not None and "/project/" in target.get("url", ""):
+        await _prune_redundant_flow_roots(flow_targets, target.get("id"))
+
     if target is None:
         encoded = urllib.parse.quote(FLOW_URL, safe="")
         await asyncio.to_thread(_http_json, f"{CDP_BASE}/json/new?{encoded}", "PUT")
@@ -266,6 +308,7 @@ async def run_flow_batch_rpc(
       const bl = wiz.cfb2h;
       if (!at) return {{ error: 'NO_AT_TOKEN' }};
 
+      let releaseCaptchaGate = null;
       if (captchaAction) {{
         const deadline = Date.now() + 25000;
         while (!globalThis.grecaptcha?.enterprise?.execute && Date.now() < deadline) {{
@@ -274,29 +317,55 @@ async def run_flow_batch_rpc(
         if (!globalThis.grecaptcha?.enterprise?.execute) {{
           return {{ error: 'CAPTCHA_FAILED: grecaptcha not available' }};
         }}
+        // Flow UI may have several ogiZ0b requests in flight, but a newly
+        // minted Enterprise reCAPTCHA token can invalidate a token that has not
+        // yet been consumed. Hold this tiny gate from mint through *dispatch*
+        // of the matching POST. Release immediately after fetch() is invoked;
+        // the network waits then run concurrently.
+        const previousMint = globalThis.__flowkitCaptchaMintTail || Promise.resolve();
+        let releaseMint;
+        const currentMint = new Promise(resolve => {{ releaseMint = resolve; }});
+        globalThis.__flowkitCaptchaMintTail = previousMint.catch(() => {{}}).then(() => currentMint);
+        await previousMint.catch(() => {{}});
         let token;
         try {{
           token = await globalThis.grecaptcha.enterprise.execute(siteKey, {{ action: captchaAction }});
         }} catch (e) {{
+          releaseMint();
           return {{ error: 'CAPTCHA_FAILED: ' + (e?.message || String(e)) }};
         }}
         freqStr = freqStr.split('__CAPTCHA__').join(token);
+        releaseCaptchaGate = releaseMint;
       }}
 
       const reqid = Math.floor(Math.random() * 900000) + 100000;
+      // Match Flow's own WIZ request metadata. GEM_PIX_2 (Nano Banana Pro)
+      // rejects the otherwise-valid ogiZ0b request when source-path is absent;
+      // Lite/Narwhal are more permissive, which hid this transport bug.
+      const sourcePath = location.pathname || '/';
+      const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
       const url =
         `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${{encodeURIComponent(rpcid)}}` +
-        `&f.sid=${{encodeURIComponent(sid || '')}}&bl=${{encodeURIComponent(bl || '')}}` +
-        `&hl=en-AU&_reqid=${{reqid}}&rt=c`;
-      const resp = await fetch(url, {{
-        method: 'POST',
-        credentials: 'include',
-        headers: {{
-          'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-          'x-same-domain': '1',
-        }},
-        body: new URLSearchParams({{ 'f.req': freqStr, at }}),
-      }});
+        `&source-path=${{encodeURIComponent(sourcePath)}}` +
+        `&bl=${{encodeURIComponent(bl || '')}}&f.sid=${{encodeURIComponent(sid || '')}}` +
+        `&hl=${{encodeURIComponent(hl)}}&_reqid=${{reqid}}&rt=c`;
+      let responsePromise;
+      try {{
+        responsePromise = fetch(url, {{
+          method: 'POST',
+          credentials: 'include',
+          headers: {{
+            'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+            'x-same-domain': '1',
+          }},
+          body: new URLSearchParams({{ 'f.req': freqStr, at }}),
+        }});
+      }} finally {{
+        // fetch() has synchronously queued the request at this point, so the
+        // token is consumed by its matching POST and the next mint is safe.
+        if (releaseCaptchaGate) releaseCaptchaGate();
+      }}
+      const resp = await responsePromise;
       const text = await resp.text();
       if (match) {{
         const found = text.indexOf(match);
