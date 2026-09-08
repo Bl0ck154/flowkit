@@ -34,6 +34,13 @@ from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
 
+# Captured from the current Flow image composer. x4 does not fire four ogiZ0b
+# requests at the same instant: requests start at roughly 0.0s, 0.5s, 1.5s,
+# and 2.5s. Keeping the same short launch cadence materially reduces transient
+# RPC [8] failures for GEM_PIX_2 while the actual generations still run in
+# parallel on Google's side.
+IMAGE_UI_SUBMIT_OFFSETS_S = (0.0, 0.5, 1.5, 2.5)
+
 
 class FlowClient:
     """Sends commands to Chrome extension via WebSocket."""
@@ -612,7 +619,12 @@ class FlowClient:
             async def submit_one(index: int):
                 # Flow's own UI implements x2/x3/x4 as independent ogiZ0b
                 # requests, not multiple generation items inside one f.req.
-                # Each request therefore gets its own single-use reCAPTCHA.
+                # It also staggers their launch (captured x4: ~0/.5/1.5/2.5s),
+                # which avoids needlessly tripping GEM_PIX_2's transient [8]
+                # guard while still leaving generation work concurrent.
+                offset = IMAGE_UI_SUBMIT_OFFSETS_S[index]
+                if offset:
+                    await asyncio.sleep(offset)
                 request_seed = seed + index * 9973 if seed is not None else None
                 freq = fb.image_request(
                     prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
