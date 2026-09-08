@@ -34,6 +34,13 @@ from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
 
+# The current Flow UI automatically retries image RPC error [8] after roughly
+# 34 seconds. Treat only that exact error as transient; other RPC failures must
+# still surface immediately. One retry mirrors the UI and avoids unbounded
+# duplicate generation.
+IMAGE_TRANSIENT_RETRY_DELAY_S = 34.0
+IMAGE_TRANSIENT_MAX_ATTEMPTS = 2
+
 
 class FlowClient:
     """Sends commands to Chrome extension via WebSocket."""
@@ -614,17 +621,36 @@ class FlowClient:
                 # requests, not multiple generation items inside one f.req.
                 # Each request therefore gets its own single-use reCAPTCHA.
                 request_seed = seed + index * 9973 if seed is not None else None
-                freq = fb.image_request(
-                    prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
-                    model=model, ref_media_ids=refs, base_media_id=base_media_id,
-                )
-                payload = await self._batch_payload(
-                    fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
-                )
-                generated = fb.read_images(payload)
-                if not generated:
-                    raise fb.FlowBatchError("Image generation returned no media url")
-                return generated[0]
+                for attempt in range(1, IMAGE_TRANSIENT_MAX_ATTEMPTS + 1):
+                    freq = fb.image_request(
+                        prompt, pid, count=1, aspect=aspect_ratio, seed=request_seed,
+                        model=model, ref_media_ids=refs, base_media_id=base_media_id,
+                    )
+                    try:
+                        payload = await self._batch_payload(
+                            fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE
+                        )
+                    except fb.RpcError as exc:
+                        transient = (
+                            exc.rpcid == fb.RPC_GEN_IMAGE
+                            and exc.detail == [8]
+                            and attempt < IMAGE_TRANSIENT_MAX_ATTEMPTS
+                        )
+                        if not transient:
+                            raise
+                        logger.warning(
+                            "Flow image RPC returned transient [8] for variant %d/%d; "
+                            "retrying in %.0fs (attempt %d/%d)",
+                            index + 1, count, IMAGE_TRANSIENT_RETRY_DELAY_S,
+                            attempt + 1, IMAGE_TRANSIENT_MAX_ATTEMPTS,
+                        )
+                        await asyncio.sleep(IMAGE_TRANSIENT_RETRY_DELAY_S)
+                        continue
+                    generated = fb.read_images(payload)
+                    if not generated:
+                        raise fb.FlowBatchError("Image generation returned no media url")
+                    return generated[0]
+                raise fb.FlowBatchError("image generation retry loop exhausted")
 
             images = await asyncio.gather(*(submit_one(i) for i in range(count)))
         except Exception as e:

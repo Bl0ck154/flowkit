@@ -46,7 +46,10 @@ curl -fsS -X POST http://127.0.0.1:8100/api/flow/generate-image \
 image gets its own single-use reCAPTCHA token. This matters for Nano Banana Pro,
 which rejects the unofficial multi-item-in-one-RPC shape tolerated by Lite. An
 optional `seed` makes the first request reproducible; subsequent variants use a
-deterministic seed stride. `reference_media_ids` is the generic name for image
+deterministic seed stride. The live Flow UI treats batchexecute RPC error `[8]`
+as transient and retries after about 34 seconds; FlowKit mirrors that with one
+bounded per-variant retry, while every other RPC error still fails immediately.
+`reference_media_ids` is the generic name for image
 references; the older `character_media_ids` field remains accepted and the two
 lists are de-duplicated.
 

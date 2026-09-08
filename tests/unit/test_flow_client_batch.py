@@ -90,6 +90,53 @@ class TestGenerateImages:
         assert all(call["captcha"] == fb.CAPTCHA_IMAGE for call in client.calls)
         assert len(result["data"]["media"]) == 2
 
+
+    async def test_rpc_error_8_retries_once_like_flow_ui(self, client, monkeypatch):
+        import agent.services.flow_client as module
+
+        attempts = 0
+        sleeps = []
+
+        async def fake_payload(rpcid, freq, captcha_action=None, timeout=300):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise fb.RpcError(fb.RPC_GEN_IMAGE, [8])
+            return [[IMAGE_URL]]
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        client._batch_payload = fake_payload
+        monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+
+        result = await client.generate_images("a cat", PROJECT, count=1)
+        assert not _is_error(result)
+        assert attempts == 2
+        assert sleeps == [module.IMAGE_TRANSIENT_RETRY_DELAY_S]
+
+    async def test_non_transient_rpc_error_is_not_retried(self, client, monkeypatch):
+        import agent.services.flow_client as module
+
+        attempts = 0
+        sleeps = []
+
+        async def fake_payload(rpcid, freq, captcha_action=None, timeout=300):
+            nonlocal attempts
+            attempts += 1
+            raise fb.RpcError(fb.RPC_GEN_IMAGE, [5])
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        client._batch_payload = fake_payload
+        monkeypatch.setattr(module.asyncio, "sleep", fake_sleep)
+
+        result = await client.generate_images("a cat", PROJECT, count=1)
+        assert _is_error(result)
+        assert attempts == 1
+        assert sleeps == []
+
     async def test_future_wire_model_is_not_silently_replaced(self, client):
         client.responses[fb.RPC_GEN_IMAGE] = {"data": envelope(fb.RPC_GEN_IMAGE, [[IMAGE_URL]])}
         await client.generate_images("a cat", PROJECT, image_model="FUTURE_BANANA_3")
