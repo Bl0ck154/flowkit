@@ -244,6 +244,15 @@ You can also pass `flow_project_id` per project on `POST /api/projects`.
 | `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
 | `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
 
+### Image API
+
+The migrated image path supports the three model choices currently exposed by
+Flow (Nano Banana Pro, Nano Banana 2 and Nano Banana 2 Lite), all five current
+aspect ratios, 1-4 outputs, real base-image editing and native 2K image export.
+`GET /api/flow/image-capabilities` discovers current frontend model ids and the
+generation endpoint accepts future valid wire ids without a FlowKit release.
+See [`docs/IMAGE_API.md`](docs/IMAGE_API.md).
+
 ### What does not work on the new API yet
 
 1080p export is ported: FlowKit now mirrors the Flow UI's `p0UkFb` high-resolution
