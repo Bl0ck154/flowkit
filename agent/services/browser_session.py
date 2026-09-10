@@ -14,6 +14,11 @@ import websockets
 CDP_BASE = os.environ.get("FLOW_CHROME_CDP", "http://127.0.0.1:9224")
 FLOW_URL = "https://flow.google.com/"
 _FLOW_PREFIXES = ("https://flow.google.com/", "https://labs.google/fx/")
+try:
+    FLOW_TAB_IDLE_CLOSE_S = max(0.0, float(os.environ.get("FLOW_TAB_IDLE_CLOSE_S", "0")))
+except ValueError:
+    FLOW_TAB_IDLE_CLOSE_S = 0.0
+_idle_close_task: asyncio.Task | None = None
 
 
 def _http_json(url: str, method: str = "GET") -> object:
@@ -31,14 +36,16 @@ def _http_text(url: str, method: str = "GET") -> str:
 
 
 def _redundant_flow_root_ids(targets: list[dict], keep_target_id: str | None = None) -> list[str]:
-    """Exact-root Flow tabs are disposable once a project signer tab exists."""
+    """Return disposable exact-root Flow tabs while preserving one signer tab."""
     has_project = any(
         t.get("type") == "page"
         and isinstance(t.get("url"), str)
         and "/project/" in t["url"]
         for t in targets
     )
-    if not has_project:
+    # Without a project page or an explicitly selected root there is no safe
+    # keeper, so inspection alone must never close the last usable Flow tab.
+    if not has_project and keep_target_id is None:
         return []
     return [
         t["id"] for t in targets
@@ -60,6 +67,55 @@ async def _prune_redundant_flow_roots(targets: list[dict], keep_target_id: str |
             # Cleanup must never make a generation fail.
             continue
     return closed
+
+
+def _flow_page_ids(targets: list[dict]) -> list[str]:
+    """Return page target ids that belong to Flow, never iframes/workers."""
+    return [
+        t["id"]
+        for t in targets
+        if t.get("type") == "page"
+        and t.get("id")
+        and isinstance(t.get("url"), str)
+        and t["url"].startswith(_FLOW_PREFIXES)
+    ]
+
+
+async def close_flow_tabs() -> int:
+    """Park a dedicated browser by closing Flow pages while keeping Chrome alive."""
+    closed = 0
+    for target_id in _flow_page_ids(await _targets()):
+        try:
+            await asyncio.to_thread(_http_text, f"{CDP_BASE}/json/close/{target_id}")
+            closed += 1
+        except Exception:
+            # Idle cleanup is best-effort and must never affect request success.
+            continue
+    return closed
+
+
+def _cancel_flow_tab_idle_close() -> None:
+    global _idle_close_task
+    if _idle_close_task is not None and not _idle_close_task.done():
+        _idle_close_task.cancel()
+    _idle_close_task = None
+
+
+def _schedule_flow_tab_idle_close() -> None:
+    """Debounce Flow-tab parking after the configured period of no batch RPCs."""
+    global _idle_close_task
+    if FLOW_TAB_IDLE_CLOSE_S <= 0:
+        return
+
+    async def close_later() -> None:
+        try:
+            await asyncio.sleep(FLOW_TAB_IDLE_CLOSE_S)
+        except asyncio.CancelledError:
+            return
+        await close_flow_tabs()
+
+    _idle_close_task = asyncio.create_task(close_later())
+
 
 async def _targets() -> list[dict]:
     try:
@@ -181,7 +237,7 @@ async def inspect_flow_session() -> dict:
     }
 
 
-async def ensure_flow_session(wait_s: float = 3.0) -> dict:
+async def _ensure_flow_session_once(wait_s: float = 3.0) -> dict:
     """Reuse the persistent Google profile to reopen/reload Flow when needed.
 
     This is not an OAuth login flow. It relies on the existing Google account
@@ -233,7 +289,16 @@ async def ensure_flow_session(wait_s: float = 3.0) -> dict:
     return {**refreshed, "recovered": False}
 
 
-async def run_flow_batch_rpc(
+async def ensure_flow_session(wait_s: float = 3.0) -> dict:
+    """Recover Flow on demand and park it later when idle parking is enabled."""
+    _cancel_flow_tab_idle_close()
+    try:
+        return await _ensure_flow_session_once(wait_s=wait_s)
+    finally:
+        _schedule_flow_tab_idle_close()
+
+
+async def _run_flow_batch_rpc_once(
     rpcid: str,
     freq: str,
     *,
@@ -259,14 +324,23 @@ async def run_flow_batch_rpc(
         and t.get("webSocketDebuggerUrl")
     ]
 
+    project_target = next(
+        (t for t in flow_targets if "/project/" in t.get("url", "")),
+        None,
+    )
     target = None
     if project_id:
         marker = f"/project/{project_id}"
         target = next((t for t in flow_targets if marker in t.get("url", "")), None)
     if target is None:
-        target = flow_targets[0] if flow_targets else None
+        # Prefer an already-loaded project page over a disposable Flow root.
+        # Root tabs are much more likely to be stale and used to accumulate
+        # after CAPTCHA recovery retries.
+        target = project_target or (flow_targets[0] if flow_targets else None)
 
-    if target is not None and "/project/" in target.get("url", ""):
+    if target is not None:
+        # Keep the selected signer page and remove exact-root duplicates. Project
+        # pages are never considered disposable by _redundant_flow_root_ids().
         await _prune_redundant_flow_roots(flow_targets, target.get("id"))
 
     if target is None:
@@ -396,3 +470,29 @@ async def run_flow_batch_rpc(
         "data": result.get("text", ""),
         "matched": result.get("matched"),
     }
+
+
+async def run_flow_batch_rpc(
+    rpcid: str,
+    freq: str,
+    *,
+    captcha_action: str | None = None,
+    match: str | None = None,
+    project_id: str | None = None,
+    timeout: float = 120,
+    max_text: int = 32_000_000,
+) -> dict:
+    """Run one batch RPC and park Flow again after a configurable idle period."""
+    _cancel_flow_tab_idle_close()
+    try:
+        return await _run_flow_batch_rpc_once(
+            rpcid,
+            freq,
+            captcha_action=captcha_action,
+            match=match,
+            project_id=project_id,
+            timeout=timeout,
+            max_text=max_text,
+        )
+    finally:
+        _schedule_flow_tab_idle_close()

@@ -146,6 +146,12 @@ Each project goes through: **story → entities → reference images → scene i
 
 <sub>The Chrome extension runs alongside Google Flow — showing real-time request log (614 total, 328 success), video generation progress, and token status. The Python agent communicates with the extension via WebSocket to automate all API calls.</sub>
 
+#### Self-hosted extension updates
+
+For managed/self-hosted installs, keep `extension/manifest.json` as the version source of truth and publish a stable update URL rather than pinning Chrome policy to a versioned XML file. `scripts/package_extension.py` verifies the manifest public key/extension ID, packs the CRX with the existing signing key, verifies the packed version, and writes a versioned CRX plus stable `updates.xml` and `release.json`. `scripts/install_extension_policy.py` then installs a readable managed-policy entry pointing at that stable `updates.xml`. The extension reports its live version and `flow.google.com` support in `/health`, so a stale production package is visible immediately.
+
+Passive extension maintenance never opens a Flow tab. When `FLOW_TAB_IDLE_CLOSE_S` is set, the agent can also close Flow pages after that many idle seconds while leaving the persistent Chrome profile, extension, and CDP browser alive; the next real Flow operation reopens the signed-in page on demand.
+
 ---
 
 ### Web Dashboard — Ops Console
@@ -800,7 +806,7 @@ These arrive in the response body as `data.error.details[].reason`. The worker a
 | `Requested entity was not found` | Uploaded `media_id` expired (~1h TTL) | Auto-recover via `_recover_entity_not_found` — re-uploads from `image_url`, re-queues PENDING |
 | `Internal error encountered` | Flow backend transient 500 | Exponential backoff retry: `2^retry * 10s`, capped 300s |
 | `reCAPTCHA failed` / `captcha` | Extension couldn't solve CAPTCHA | Retry up to 10× without incrementing `retry_count` (processor.py:454-464) |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually rapid bursts of submits, VPN/shared IP, or stale auth cookies | NOT auto-recoverable. Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in at `labs.google/fx/tools/flow`, then resubmit with ≥1s gap and ≤5 concurrent. See `/fk-doctor` for full playbook. |
+| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually rapid bursts of submits, VPN/shared IP, or stale auth cookies | NOT auto-recoverable. Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in at `flow.google.com`, then resubmit with ≥1s gap and ≤5 concurrent. See `/fk-doctor` for full playbook. |
 
 ### HTTP Status Codes
 
