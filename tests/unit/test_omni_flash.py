@@ -1,9 +1,8 @@
 """Unit tests for Gemini Omni Flash Flow submissions and workflow polling.
 
-Omni speaks the pre-migration transports — the REST endpoints on aisandbox-pa
-and the labs.google tRPC snapshot it polls through — so the wire contracts
-asserted here are legacy-path contracts and the module is pinned to that path
-for the file. What happens on the batch path is one test at the bottom.
+Most legacy Omni wire-contract tests stay pinned to the pre-migration path.
+Batch-specific tests opt into ``USE_BATCH_RPC`` explicitly and lock down the
+migrated Flow payloads separately.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,7 +26,7 @@ from agent.services.omni_flash import (
 
 @pytest.fixture(autouse=True)
 def legacy_transport(monkeypatch):
-    """Omni is only reachable on the pre-migration path; assert it there."""
+    """Default to legacy for legacy wire-contract tests; batch tests opt in."""
     monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", False)
 
 
@@ -139,12 +138,17 @@ async def test_batch_text_video_builds_4s_yhhmef_submit(monkeypatch):
     client = MagicMock()
     client._batch_project_id.return_value = "11111111-2222-3333-4444-555555555555"
     client._batch_payload = AsyncMock(return_value=[
-        None, 10, [], [[
+        None,
+        10,
+        [],
+        [[
             "22222222-3333-4444-5555-666666666666",
             "11111111-2222-3333-4444-555555555555",
-            "77777777-8888-9999-aaaa-bbbbbbbbbbbb", "CAE",
+            "77777777-8888-9999-aaaa-bbbbbbbbbbbb",
+            "CAE",
         ]],
     ])
+
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await generate_omni_flash_text_video(
             prompt="A red paper boat drifts across a pond",
@@ -152,16 +156,62 @@ async def test_batch_text_video_builds_4s_yhhmef_submit(monkeypatch):
             duration_s=4,
             aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
         )
+
     assert result["status"] == 200
     assert result["data"]["model"] == "abra_t2v_4s"
     assert result["data"]["duration_s"] == 4
     assert result["data"]["flowkitPolling"]["mode"] == "batch_media"
+    assert result["data"]["flowkitPolling"]["workflows"][0]["primary_media_id"] == (
+        "22222222-3333-4444-5555-666666666666"
+    )
     rpcid, freq, captcha = client._batch_payload.await_args.args[:3]
     assert rpcid == omni_flash.fb.RPC_GEN_VIDEO_TEXT
     assert captcha == omni_flash.fb.CAPTCHA_VIDEO
     payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
     assert payload[0][0][1] == "abra_t2v_4s"
+    assert payload[0][0][2] == omni_flash.fb.VIDEO_ASPECT_LANDSCAPE
 
+
+
+
+@pytest.mark.asyncio
+async def test_batch_first_frame_video_uses_eb1hjf_abra_i2v(monkeypatch):
+    monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
+    client = MagicMock()
+    pid = "11111111-2222-3333-4444-555555555555"
+    client._batch_project_id.return_value = pid
+    client._batch_payload = AsyncMock(return_value=[
+        None,
+        50,
+        [["op-omni-1", pid, "scene-1", None]],
+    ])
+
+    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
+        result = await generate_omni_flash_first_frame_video(
+            start_image_media_id="media-start",
+            prompt="Three children clap gently",
+            project_id=pid,
+            duration_s=6,
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        )
+
+    assert result["status"] == 200
+    assert result["data"]["model"] == "abra_i2v_6s"
+    assert result["data"]["duration_s"] == 6
+    assert result["data"]["flowkitPolling"]["mode"] == "batch_operation"
+    assert result["data"]["flowkitPolling"]["project_id"] == pid
+    assert result["data"]["operations"][0]["operation"]["name"] == "op-omni-1"
+    client._remember_operation.assert_called_once_with("op-omni-1", pid)
+
+    rpcid, freq, captcha = client._batch_payload.await_args.args[:3]
+    assert rpcid == omni_flash.fb.RPC_GEN_VIDEO
+    assert captcha == omni_flash.fb.CAPTCHA_VIDEO
+    payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
+    request = payload[0][0]
+    assert request[0][2][0][0][0] == "Three children clap gently"
+    assert request[1] == "abra_i2v_6s"
+    assert request[2] == omni_flash.fb.VIDEO_ASPECT_LANDSCAPE
+    assert request[4][1] == "media-start"
 
 @pytest.mark.asyncio
 async def test_submit_builds_flow_omni_first_frame_request_and_poll_descriptor():
@@ -390,13 +440,24 @@ async def test_batch_omni_poll_uses_as29s_media(monkeypatch):
     client = MagicMock()
     client.get_media = AsyncMock(return_value={
         "status": 200,
-        "data": {"video": {"fifeUrl": "https://flow-content.google/video/media-1?Signature=test"}},
+        "data": {
+            "video": {
+                "fifeUrl": "https://flow-content.google/video/media-1?Signature=test"
+            }
+        },
     })
+
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await check_omni_flash_status([{
-            "name": "workflow-1", "primary_media_id": "media-1", "project_id": "project-1",
-        }])
+        result = await check_omni_flash_status([
+            {
+                "name": "workflow-1",
+                "primary_media_id": "media-1",
+                "project_id": "project-1",
+            }
+        ])
+
     assert result["done"] is True
+    assert result["status"] == "COMPLETED"
     assert result["workflows"][0]["media"]["resolved_via"] == "as29s"
     client.get_media.assert_awaited_once_with("media-1")
 
@@ -525,10 +586,8 @@ async def test_submit_rejects_empty_reference_set():
         )
 
 
-class TestUnportedOmniBatchModesAreRefusedRatherThanAttempted:
-    """Flow stopped minting the bearer these endpoints need, and no Omni
-    payload has been captured off the new frontend. Saying so beats a 401
-    five retries deep."""
+class TestRemainingUnportedOmniBatchModesAreRefused:
+    """Only start+end/reference remain blocked; first-frame I2V is migrated."""
 
     @pytest.fixture(autouse=True)
     def batch_transport(self, monkeypatch):
@@ -541,12 +600,6 @@ class TestUnportedOmniBatchModesAreRefusedRatherThanAttempted:
             stub._send = AsyncMock()
             factory.return_value = stub
             yield stub
-
-    async def test_first_frame_names_the_gap_and_sends_nothing(self, client):
-        result = await generate_omni_flash_first_frame_video(
-            start_image_media_id="mid", prompt="go", project_id="pid")
-        assert "UNSUPPORTED_ON_BATCH_API" in result["error"]
-        client._send.assert_not_called()
 
     async def test_first_last_names_the_gap_and_sends_nothing(self, client):
         result = await generate_omni_flash_first_last_video(
@@ -564,5 +617,5 @@ class TestUnportedOmniBatchModesAreRefusedRatherThanAttempted:
     async def test_the_message_points_to_supported_text_to_video(self, client):
         result = await generate_omni_flash_video(
             reference_media_ids=["a"], prompt="go", project_id="pid")
-        assert "text-to-video is supported" in result["error"]
+        assert "image-to-video and text-to-video are supported" in result["error"]
         assert "reference-to-video" in result["error"]
