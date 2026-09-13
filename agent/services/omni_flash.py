@@ -12,10 +12,11 @@ First+Last rollout uses the same Omni I2V family but the StartAndEnd endpoint;
 that mapping is deliberately configurable separately so it can be changed
 without a code release if Google's rollout rotates the wire key.
 
-Important: Omni submit responses may contain operation-looking handles, but
-those handles are not compatible with the legacy
-``batchCheckAsyncVideoGenerationStatus`` polling endpoint. Omni jobs are
-workflow-backed and are polled through Flow's authenticated project data.
+Important: on the migrated ``flow.google.com`` batch transport, first-frame
+Omni I2V uses the same ``eb1hJf`` operation contract as migrated Veo, with the
+wire model switched to ``abra_i2v_<duration>s``. Those jobs therefore use the
+normal batch operation poller. Legacy Omni and migrated text-to-video keep their
+workflow/media polling contracts.
 """
 
 from __future__ import annotations
@@ -33,23 +34,19 @@ from agent.services.headers import random_headers
 
 _MODELS_FILE = Path(__file__).parent.parent / "models.json"
 
-#: Every Omni surface here rides the pre-migration transports — the REST
-#: endpoints on aisandbox-pa and the labs.google tRPC snapshot it polls
-#: through. Flow moved to flow.google.com in September 2026 and stopped
-#: minting the bearer both of those need, and no Omni payload has been
-#: captured off the new frontend, so on the batch path these fail with a
-#: name rather than dying on a 401 five retries deep.
-_UNSUPPORTED_ON_BATCH = (
-    "UNSUPPORTED_ON_BATCH_API: Omni Flash frame/reference generation is not yet "
-    "ported to flow.google.com batchexecute. Omni text-to-video is supported on "
-    "the batch path; frame-to-video, start+end and reference-to-video still need "
-    "their migrated payload captures."
+#: First-frame I2V is live on the migrated batch transport. Start+end and
+#: reference-image modes still need their current Flow UI payloads captured;
+#: keep those explicitly blocked instead of falling through to dead legacy auth.
+_UNSUPPORTED_START_END_ON_BATCH = (
+    "UNSUPPORTED_ON_BATCH_API: Omni Flash first+last frame generation is not yet "
+    "ported to flow.google.com batchexecute. First-frame image-to-video and "
+    "text-to-video are supported on the batch path."
 )
-
-
-def _batch_path_blocks_omni() -> dict | None:
-    """The error to return instead of reaching for auth that is gone."""
-    return {"error": _UNSUPPORTED_ON_BATCH} if USE_BATCH_RPC else None
+_UNSUPPORTED_REFERENCE_ON_BATCH = (
+    "UNSUPPORTED_ON_BATCH_API: Omni Flash reference-to-video is not yet ported "
+    "to flow.google.com batchexecute. First-frame image-to-video and text-to-video "
+    "are supported on the batch path."
+)
 
 OMNI_FLASH_VALID_DURATIONS = (4, 6, 8, 10)
 OMNI_FLASH_VALID_ASPECTS = {
@@ -289,10 +286,13 @@ async def _submit_omni_frame_video(
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
 ) -> dict:
-    """Submit Omni first-frame or First+Last generation."""
-    blocked = _batch_path_blocks_omni()
-    if blocked:
-        return blocked
+    """Submit Omni first-frame or First+Last generation.
+
+    Migrated first-frame I2V was recaptured from the live Flow UI on
+    2026-09-14: it uses ``eb1hJf`` with the normal image-to-video payload and
+    ``abra_i2v_<duration>s`` as the wire model. Its response is a standard
+    batch operation, so poll it through ``/api/flow/check-status``.
+    """
     _validate_frame_inputs(
         start_image_media_id,
         end_image_media_id,
@@ -305,13 +305,55 @@ async def _submit_omni_frame_video(
         if end_image_media_id is not None
         else "frame_to_video"
     )
+    model_key = _load_model_key(duration_s, mode=mode)
+    client = get_flow_client()
+
+    if USE_BATCH_RPC:
+        if end_image_media_id is not None:
+            return {"error": _UNSUPPORTED_START_END_ON_BATCH}
+        try:
+            pid = client._batch_project_id(project_id)
+            freq = fb.video_request(
+                prompt,
+                pid,
+                start_image_media_id,
+                aspect=aspect_ratio,
+                model=model_key,
+            )
+            payload = await client._batch_payload(
+                fb.RPC_GEN_VIDEO,
+                freq,
+                fb.CAPTCHA_VIDEO,
+                timeout=120,
+            )
+            operation = fb.read_operation(payload)
+            client._remember_operation(operation.operation_id, pid)
+        except Exception as exc:
+            return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+
+        pending = {
+            "operation": {"name": operation.operation_id},
+            "status": "MEDIA_GENERATION_STATUS_PENDING",
+        }
+        return {
+            "status": 200,
+            "data": {
+                "operations": [pending],
+                "model": model_key,
+                "duration_s": duration_s,
+                "flowkitPolling": {
+                    "mode": "batch_operation",
+                    "project_id": pid,
+                    "operations": [pending],
+                },
+            },
+        }
+
     endpoint = (
         "generate_video_start_end"
         if end_image_media_id is not None
         else "generate_video"
     )
-    model_key = _load_model_key(duration_s, mode=mode)
-    client = get_flow_client()
     ts = int(time.time() * 1000)
 
     request_item = {
@@ -412,9 +454,8 @@ async def generate_omni_flash_video(
     the workflow names and primary media IDs required by the Omni polling path.
     Do not feed Omni operation handles to ``check_video_status``.
     """
-    blocked = _batch_path_blocks_omni()
-    if blocked:
-        return blocked
+    if USE_BATCH_RPC:
+        return {"error": _UNSUPPORTED_REFERENCE_ON_BATCH}
     refs = _validate_reference_inputs(reference_media_ids, duration_s, aspect_ratio)
     model_key = _load_model_key(duration_s, mode="reference_to_video")
     client = get_flow_client()

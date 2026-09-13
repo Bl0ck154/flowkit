@@ -22,12 +22,12 @@ Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remo
 
 ## Supported modes
 
-On the current `flow.google.com` batch transport, Omni **text-to-video** is live and verified. The older frame/reference implementations below still depend on the pre-migration REST transport and are deliberately refused while `USE_BATCH_RPC=1`.
+On the current `flow.google.com` batch transport, Omni **text-to-video** and **first-frame image-to-video** are live and verified. First+Last and multi-reference generation still depend on the pre-migration transport and remain explicitly refused while `USE_BATCH_RPC=1` until their current UI payloads are captured.
 
 | Mode | Batch status | Endpoint | Internal model family |
 |---|---|---|---|
 | Text to video | **supported** | `POST /api/flow/generate-video-omni-text` | `abra_t2v_<duration>s` |
-| First frame to video | not yet ported | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` (legacy only) |
+| First frame to video | **supported** | `POST /api/flow/generate-video` with `model_family=omni_flash` | `abra_i2v_<duration>s` |
 | First + Last frame to video | not yet ported | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` (legacy only) |
 | References to video | not yet ported | `POST /api/flow/generate-video-omni` | `abra_r2v_<duration>s` (legacy only) |
 
@@ -36,18 +36,21 @@ Text-to-video durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ra
 - `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`)
 - `VIDEO_ASPECT_RATIO_LANDSCAPE` (`16:9`)
 
-The migrated `YhhmEf` wire was live-verified with `abra_t2v_4s`; the downloaded result was exactly 4.000 seconds at 1280x720/24 fps. Poll migrated Omni media through `/api/flow/check-omni-status`, which resolves the finished MP4 with `as29s`.
+The migrated `YhhmEf` wire was live-verified with `abra_t2v_4s`; the downloaded result was exactly 4.000 seconds at 1280x720/24 fps. First-frame I2V was re-captured from the live Flow UI on 2026-09-14: it uses RPC `eb1hJf`, the normal migrated I2V payload shape, and `abra_i2v_<duration>s`. A live API smoke test completed successfully and resolved its signed video URL through the existing batch operation poller.
+
+Polling differs by migrated mode: text-to-video returns workflow/media descriptors and uses `/api/flow/check-omni-status`; first-frame I2V returns a `flowkitPolling.mode = batch_operation` descriptor and uses `/api/flow/check-status` with its `operations` array.
 
 ## End-to-end integration flow
 
-For the current migrated text-to-video path, an integration agent should implement this state machine:
+For migrated Omni, an integration agent should use the polling mode returned by the submit response:
 
 1. Check `/health` and `/api/flow/status`.
-2. Call `POST /api/flow/generate-video-omni-text` with the prompt, Flow project ID, duration and aspect ratio.
+2. Submit either text-to-video or first-frame I2V.
 3. Persist the complete `flowkitPolling` object returned by the submit.
-4. Poll `/api/flow/check-omni-status` every 10-20 seconds using `project_id` and `workflows` from `flowkitPolling`.
-5. On `PENDING`, continue polling. On `FAILED`, stop and report the returned error. On `COMPLETED`, immediately download every non-null `media.url`.
-6. Store the downloaded video in the project's own durable storage. The returned Google URL is signed and short-lived.
+4. If `mode=batch_media`, poll `/api/flow/check-omni-status` using `project_id` + `workflows`.
+5. If `mode=batch_operation`, poll `/api/flow/check-status` using `project_id` + `operations`.
+6. On pending state, continue polling; on failure, stop; on success, immediately download the returned signed video URL.
+7. Store the downloaded video in durable storage because Google URLs are signed and short-lived.
 
 Example 4-second submit:
 
