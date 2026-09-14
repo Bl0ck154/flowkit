@@ -154,6 +154,42 @@ class TestVideoRequest:
         crop = [None, 0.1, 1, 0.9]
         assert inner(fb.video_request("go", self.PID, "mid", crop=crop))[0][0][4][5] == crop
 
+    def test_omni_first_frame_360p_matches_live_eb1hjf_shape(self):
+        payload = inner(fb.omni_first_frame_request(
+            "move", self.PID, "start-mid", duration_s=4, resolution="360p",
+            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        ))
+        request = payload[0][0]
+        assert request[1] == "abra_i2v_4s_360p"
+        assert request[2] == fb.VIDEO_ASPECT_LANDSCAPE
+        assert request[4][1] == "start-mid"
+        assert request[-1] == [4]
+        assert json.loads(fb.omni_first_frame_request("x", self.PID, "m"))[0][0][0] == fb.RPC_GEN_VIDEO
+
+    def test_omni_first_last_matches_live_nprqif_shape(self):
+        freq = fb.omni_first_last_request(
+            "morph", self.PID, "start", "end", duration_s=6, resolution="720p",
+            aspect="VIDEO_ASPECT_RATIO_PORTRAIT",
+        )
+        assert json.loads(freq)[0][0][0] == fb.RPC_GEN_VIDEO_FIRST_LAST
+        request = inner(freq)[0][0]
+        assert request[1] == "omni_flash_i2v_6s_first_last"
+        assert request[2] == fb.VIDEO_ASPECT_PORTRAIT
+        assert request[4][1] == "start"
+        assert request[5][1] == "end"
+
+    def test_omni_reference_matches_live_mzza6b_shape(self):
+        freq = fb.omni_reference_video_request(
+            "keep refs", self.PID, ["a", "b"], duration_s=4, resolution="360p",
+            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        )
+        assert json.loads(freq)[0][0][0] == fb.RPC_GEN_VIDEO_REFERENCES
+        request = inner(freq)[0][0]
+        assert request[1] == [[None, "a"], [None, "b"]]
+        assert request[2] == "abra_r2v_4s_360p"
+        assert request[3] == fb.VIDEO_ASPECT_LANDSCAPE
+        assert request[-1] == [4]
+
     def test_text_video_matches_the_captured_yhhmef_shape(self):
         payload = inner(fb.text_video_request(
             "a boat",

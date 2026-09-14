@@ -37,6 +37,8 @@ MEDIA_HOST = "flow-content.google"
 RPC_GEN_IMAGE = "ogiZ0b"
 RPC_GEN_VIDEO = "eb1hJf"
 RPC_GEN_VIDEO_TEXT = "YhhmEf"
+RPC_GEN_VIDEO_FIRST_LAST = "nprQif"
+RPC_GEN_VIDEO_REFERENCES = "MZZa6b"
 RPC_OPERATION = "jwpduf"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
@@ -423,6 +425,101 @@ def video_request(prompt: str, project_id: str, source_media_id: str,
         [_client_uuid(), 2],
     ]
     return build_envelope(RPC_GEN_VIDEO, inner)
+
+
+def omni_first_frame_request(prompt: str, project_id: str, source_media_id: str,
+                             *, duration_s: int = 8, resolution: str = "720p",
+                             aspect: Any = VIDEO_ASPECT_LANDSCAPE,
+                             crop: Optional[list] = None) -> str:
+    """Build current Omni first-frame I2V (RPC ``eb1hJf``).
+
+    Live-captured from Flow on 2026-09-14. 720p uses ``abra_i2v_<N>s``;
+    360p appends ``_360p`` and carries the UI's low-resolution option slot.
+    """
+    if duration_s not in (4, 6, 8, 10):
+        raise ValueError("Omni duration must be 4, 6, 8 or 10 seconds")
+    res = str(resolution).strip().lower()
+    if res not in {"360p", "720p"}:
+        raise ValueError("Omni resolution must be 360p or 720p")
+    model = f"abra_i2v_{duration_s}s" + ("_360p" if res == "360p" else "")
+    request = [
+        [None, None, [[[prompt]]]],
+        model,
+        resolve_video_aspect(aspect),
+        None,
+        [None, source_media_id, None, None, None,
+         FULL_FRAME_CROP if crop is None else crop],
+        [None, None, None, None, _client_uuid(), _client_uuid()],
+    ]
+    if res == "360p":
+        request.extend([None, None, None, [4]])
+    return build_envelope(RPC_GEN_VIDEO, [
+        [request],
+        _context(project_id),
+        [_client_uuid(), 2],
+    ])
+
+
+def omni_first_last_request(prompt: str, project_id: str,
+                            start_media_id: str, end_media_id: str,
+                            *, duration_s: int = 8, resolution: str = "720p",
+                            aspect: Any = VIDEO_ASPECT_LANDSCAPE,
+                            start_crop: Optional[list] = None,
+                            end_crop: Optional[list] = None) -> str:
+    """Build Omni First+Last frames submit (RPC ``nprQif``)."""
+    if duration_s not in (4, 6, 8, 10):
+        raise ValueError("Omni duration must be 4, 6, 8 or 10 seconds")
+    res = str(resolution).strip().lower()
+    if res not in {"360p", "720p"}:
+        raise ValueError("Omni resolution must be 360p or 720p")
+    model = f"omni_flash_i2v_{duration_s}s_first_last" + ("_360p" if res == "360p" else "")
+    request = [
+        [None, None, [[[prompt]]]],
+        model,
+        resolve_video_aspect(aspect),
+        None,
+        [None, start_media_id, None, None, None,
+         FULL_FRAME_CROP if start_crop is None else start_crop],
+        [None, end_media_id, None, None, None,
+         FULL_FRAME_CROP if end_crop is None else end_crop],
+        [None, None, None, None, _client_uuid(), _client_uuid()],
+    ]
+    return build_envelope(RPC_GEN_VIDEO_FIRST_LAST, [
+        [request],
+        _context(project_id),
+        [_client_uuid(), 2],
+    ])
+
+
+def omni_reference_video_request(prompt: str, project_id: str,
+                                 reference_media_ids: list[str],
+                                 *, duration_s: int = 8, resolution: str = "720p",
+                                 aspect: Any = VIDEO_ASPECT_LANDSCAPE) -> str:
+    """Build Omni Ingredients/reference-to-video submit (RPC ``MZZa6b``)."""
+    refs = [str(mid) for mid in reference_media_ids if str(mid)]
+    if not refs:
+        raise ValueError("Omni reference-to-video requires at least one reference image")
+    if duration_s not in (4, 6, 8, 10):
+        raise ValueError("Omni duration must be 4, 6, 8 or 10 seconds")
+    res = str(resolution).strip().lower()
+    if res not in {"360p", "720p"}:
+        raise ValueError("Omni resolution must be 360p or 720p")
+    model = f"abra_r2v_{duration_s}s" + ("_360p" if res == "360p" else "")
+    request = [
+        [None, None, [[[prompt]]]],
+        [[None, mid] for mid in refs],
+        model,
+        resolve_video_aspect(aspect),
+        None,
+        [None, None, None, None, _client_uuid(), _client_uuid()],
+    ]
+    if res == "360p":
+        request.extend([None, None, None, None, None, [4]])
+    return build_envelope(RPC_GEN_VIDEO_REFERENCES, [
+        [request],
+        _context(project_id),
+        [_client_uuid(), 2],
+    ])
 
 
 def text_video_request(prompt: str, project_id: str,
