@@ -22,37 +22,37 @@ Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remo
 
 ## Supported modes
 
-On the current `flow.google.com` batch transport, Omni **text-to-video** and **first-frame image-to-video** are live and verified. First+Last and multi-reference generation still depend on the pre-migration transport and remain explicitly refused while `USE_BATCH_RPC=1` until their current UI payloads are captured.
+On the current `flow.google.com` batch transport, every Omni 1.1 Flash video mode exposed by Flow's Video composer is supported and live-verified:
 
-| Mode | Batch status | Endpoint | Internal model family |
+| Mode | Batch status | Endpoint | Current wire |
 |---|---|---|---|
-| Text to video | **supported** | `POST /api/flow/generate-video-omni-text` | `abra_t2v_<duration>s` |
-| First frame to video | **supported** | `POST /api/flow/generate-video` with `model_family=omni_flash` | `abra_i2v_<duration>s` |
-| First + Last frame to video | not yet ported | `POST /api/flow/generate-video` | `abra_i2v_<duration>s` (legacy only) |
-| References to video | not yet ported | `POST /api/flow/generate-video-omni` | `abra_r2v_<duration>s` (legacy only) |
+| Text to video | **supported** | `POST /api/flow/generate-video-omni-text` | `YhhmEf` + `abra_t2v_<duration>s` |
+| First frame to video | **supported** | `POST /api/flow/generate-video` with `model_family=omni_flash` | `eb1hJf` + `abra_i2v_<duration>s` |
+| First + Last frame to video | **supported** | `POST /api/flow/generate-video` with `model_family=omni_flash` + `end_image_media_id` | `nprQif` + `omni_flash_i2v_<duration>s_first_last` |
+| Ingredients / references to video | **supported** | `POST /api/flow/generate-video-omni` or `/generate-video-refs` | `MZZa6b` + `abra_r2v_<duration>s` |
 
-Text-to-video durations are `4`, `6`, `8`, and `10` seconds. Supported aspect ratios are:
+Reference-conditioned modes support durations `4`, `6`, `8`, and `10` seconds, resolutions `360p` and `720p`, and:
 
 - `VIDEO_ASPECT_RATIO_PORTRAIT` (`9:16`)
 - `VIDEO_ASPECT_RATIO_LANDSCAPE` (`16:9`)
 
-The migrated `YhhmEf` wire was live-verified with `abra_t2v_4s`; the downloaded result was exactly 4.000 seconds at 1280x720/24 fps. First-frame I2V was re-captured from the live Flow UI on 2026-09-14: it uses RPC `eb1hJf`, the normal migrated I2V payload shape, and `abra_i2v_<duration>s`. A live API smoke test completed successfully and resolved its signed video URL through the existing batch operation poller.
+For 360p Flow uses `_360p` model variants. The 360p first-frame and Ingredients payloads also carry the same low-resolution option slots captured from the live UI. First+Last uses its dedicated `nprQif` payload and model family.
 
-Polling differs by migrated mode: text-to-video returns workflow/media descriptors and uses `/api/flow/check-omni-status`; first-frame I2V returns a `flowkitPolling.mode = batch_operation` descriptor and uses `/api/flow/check-status` with its `operations` array.
+The migrated wires were re-captured from the live Flow UI on 2026-09-14. Live API smoke tests completed successfully for First frame, First+Last, and Ingredients/R2V and resolved signed `flow-content.google` video URLs through the batch operation poller.
+
+Polling differs only for text-to-video: text-to-video returns `flowkitPolling.mode=batch_media` and uses `/api/flow/check-omni-status`; all image/reference-conditioned modes return `flowkitPolling.mode=batch_operation` and use `/api/flow/check-status` with their `operations` array.
 
 ## End-to-end integration flow
 
-For migrated Omni, an integration agent should use the polling mode returned by the submit response:
-
 1. Check `/health` and `/api/flow/status`.
-2. Submit either text-to-video or first-frame I2V.
-3. Persist the complete `flowkitPolling` object returned by the submit.
+2. Submit the desired Omni mode.
+3. Persist the complete `flowkitPolling` object returned by the submit before doing anything else.
 4. If `mode=batch_media`, poll `/api/flow/check-omni-status` using `project_id` + `workflows`.
 5. If `mode=batch_operation`, poll `/api/flow/check-status` using `project_id` + `operations`.
-6. On pending state, continue polling; on failure, stop; on success, immediately download the returned signed video URL.
+6. Continue on pending state; stop on failure; on success immediately download the signed video URL.
 7. Store the downloaded video in durable storage because Google URLs are signed and short-lived.
 
-Example 4-second submit:
+Example text-to-video submit:
 
 ```bash
 curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video-omni-text" \
@@ -65,11 +65,11 @@ curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video-omni-text" \
   }'
 ```
 
-Do not send Omni workflow names to the legacy Veo `batchCheckAsyncVideoGenerationStatus` operation poller. Do not use the obsolete `/v1/media/<primaryMediaId>` polling path.
+Do not convert workflow names into operation handles, and do not convert batch operation handles into workflow names. Persist and replay the polling descriptor exactly as FlowKit returns it.
 
 ## Supplying images
 
-This section applies to the older frame/reference Omni modes. Those generation modes are currently refused on `USE_BATCH_RPC=1` until their migrated payloads are captured; image upload itself may still be used by supported Veo workflows.
+Frame, First+Last, and Ingredients/R2V all consume Flow media IDs. Upload or reuse the reference images first, then pass their media IDs to the generation endpoint.
 
 `POST /api/flow/upload-image` is not a multipart upload endpoint. Its `file_path` is an absolute path on the **FlowKit server**, not on the calling server.
 
@@ -117,12 +117,13 @@ curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video" \
     "project_id": "FLOW_PROJECT_ID",
     "scene_id": "JOB_ID",
     "duration_s": 4,
+    "resolution": "720p",
     "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
     "user_paygate_tier": "PAYGATE_TIER_ONE"
   }'
 ```
 
-This uses `batchAsyncGenerateVideoStartImage`.
+This uses batch RPC `eb1hJf` with `abra_i2v_<duration>s` (or the `_360p` variant).
 
 ## First + Last frame to video
 
@@ -137,12 +138,13 @@ curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video" \
     "project_id": "FLOW_PROJECT_ID",
     "scene_id": "JOB_ID",
     "duration_s": 4,
+    "resolution": "720p",
     "aspect_ratio": "VIDEO_ASPECT_RATIO_PORTRAIT",
     "user_paygate_tier": "PAYGATE_TIER_ONE"
   }'
 ```
 
-This uses `batchAsyncGenerateVideoStartAndEndImage` and sends both `startImage` and `endImage`.
+This uses batch RPC `nprQif` with the dedicated `omni_flash_i2v_<duration>s_first_last` model family.
 
 ## References to video
 
@@ -157,86 +159,71 @@ curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/generate-video-omni" \
     "project_id": "FLOW_PROJECT_ID",
     "scene_id": "JOB_ID",
     "duration_s": 4,
+    "resolution": "720p",
     "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
     "user_paygate_tier": "PAYGATE_TIER_ONE"
   }'
 ```
 
-The compatible generic endpoint is `POST /api/flow/generate-video-refs` with the same fields plus `"model_family":"omni_flash"`.
+The compatible generic endpoint is `POST /api/flow/generate-video-refs` with the same fields plus `"model_family":"omni_flash"`. Both routes use batch RPC `MZZa6b`.
 
 ## Submit response and polling
 
-Persist the entire normalized polling descriptor returned by submit:
+Image/reference-conditioned Omni submits return normal batch operation polling:
 
 ```json
 {
+  "operations": [
+    {"operation":{"name":"OPERATION_ID"},"status":"MEDIA_GENERATION_STATUS_PENDING"}
+  ],
+  "model": "abra_r2v_4s",
+  "duration_s": 4,
+  "resolution": "720p",
   "flowkitPolling": {
-    "mode": "project_media",
+    "mode": "batch_operation",
     "project_id": "FLOW_PROJECT_ID",
-    "workflows": [
-      {
-        "name": "WORKFLOW_NAME",
-        "primary_media_id": "PRIMARY_MEDIA_ID",
-        "project_id": "FLOW_PROJECT_ID"
-      }
+    "operations": [
+      {"operation":{"name":"OPERATION_ID"},"status":"MEDIA_GENERATION_STATUS_PENDING"}
     ]
   }
 }
 ```
 
-Poll using those values without transforming workflow names into operation handles:
+Poll that descriptor without transforming it:
 
 ```bash
-curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/check-omni-status" \
+curl -fsS -X POST "$FLOWKIT_BASE_URL/api/flow/check-status" \
   -H 'Content-Type: application/json' \
   -d '{
     "project_id": "FLOW_PROJECT_ID",
-    "workflows": [
-      {
-        "name": "WORKFLOW_NAME",
-        "primary_media_id": "PRIMARY_MEDIA_ID",
-        "project_id": "FLOW_PROJECT_ID"
-      }
-    ],
-    "include_encoded_video": false
+    "operations": [
+      {"operation":{"name":"OPERATION_ID"},"status":"MEDIA_GENERATION_STATUS_PENDING"}
+    ]
   }'
 ```
 
-The generic `POST /api/flow/check-status` endpoint also accepts the same `workflows` and automatically selects Omni project polling.
-
-Pending response:
+When complete, the operation contains the generated media ID and signed video URL:
 
 ```json
 {
-  "project_id": "FLOW_PROJECT_ID",
-  "done": false,
-  "status": "PENDING",
-  "workflows": [{"done":false,"status":"PENDING"}]
-}
-```
-
-Successful response:
-
-```json
-{
-  "project_id": "FLOW_PROJECT_ID",
-  "done": true,
-  "status": "COMPLETED",
-  "workflows": [
+  "operations": [
     {
-      "done": true,
-      "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
-      "media": {
-        "media_id": "PRIMARY_MEDIA_ID",
-        "url": "https://flow-content.google/...",
-        "encoded_video_available": false
-      }
+      "operation": {
+        "name": "OPERATION_ID",
+        "metadata": {
+          "video": {
+            "mediaId": "MEDIA_ID",
+            "fifeUrl": "https://flow-content.google/video/..."
+          }
+        }
+      },
+      "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"
     }
   ]
 }
 ```
 
-Keep `include_encoded_video` set to `false`. FlowKit resolves the signed download URL without buffering the MP4 through Chrome or the extension bridge.
+Text-to-video remains the exception: it returns `mode=batch_media` with workflow/media descriptors and is polled through `/api/flow/check-omni-status`.
 
 ## Retry and failure policy
 
@@ -278,15 +265,15 @@ Mappings live in `agent/models.json`:
 }
 ```
 
-The mappings can be changed through `PATCH /api/models` if Google rotates internal keys. Treat configured credit-cost estimates as informational only: Google can change pricing, so use `GET /api/flow/credits` and the submit response's `remainingCredits` where available.
+The legacy mappings above remain for the pre-migration transport. On the migrated batch transport, current Flow wire names are derived from duration + resolution exactly as live-captured: First frame uses `abra_i2v_*`, First+Last uses `omni_flash_i2v_*_first_last`, and Ingredients uses `abra_r2v_*`, with `_360p` appended for 360p. The mappings can still be changed through `PATCH /api/models` for legacy transport if Google rotates old keys. Treat configured credit-cost estimates as informational only: Google can change pricing, so use `GET /api/flow/credits` and the submit response's `remainingCredits` where available.
 
 ## Minimal agent checklist
 
 - Use the `/api/flow/...` paths exactly.
 - Select Omni explicitly with `model_family: "omni_flash"` on shared endpoints.
 - Upload inputs once and reuse returned Flow media IDs.
-- Persist `project_id`, workflow `name`, and `primary_media_id` before polling.
-- Poll workflows through project media status, never through legacy Veo operations.
+- Persist the entire returned `flowkitPolling` descriptor before polling.
+- Use `/check-status` for `batch_operation` and `/check-omni-status` for `batch_media`; never transform one receipt type into the other.
 - Download signed output URLs immediately into durable project storage.
 - Do not log Google auth data, extension messages, or complete signed URLs.
 - Use a stable `scene_id`/job ID for traceability.

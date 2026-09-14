@@ -39,6 +39,7 @@ class GenerateVideoRequest(BaseModel):
     # Backward compatible: legacy requests remain Veo unless explicitly set.
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -52,6 +53,7 @@ class GenerateVideoRefsRequest(BaseModel):
     # explicitly opt into Omni Flash.
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
 
 
 class GenerateOmniFlashVideoRequest(BaseModel):
@@ -60,6 +62,7 @@ class GenerateOmniFlashVideoRequest(BaseModel):
     project_id: str
     scene_id: str = ""
     duration_s: int = 8
+    resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
 
@@ -173,8 +176,8 @@ async def generate_video(body: GenerateVideoRequest):
     request uses Omni First frame. When ``end_image_media_id`` is also present,
     it uses Omni First+Last frames.
 
-    Omni responses include ``flowkitPolling.workflows`` and must use workflow
-    media polling rather than legacy operation polling.
+    On the migrated batch transport, Omni frame-conditioned responses return
+    ``flowkitPolling.mode=batch_operation`` and are polled through ``/check-status``.
     """
     client = get_flow_client()
     if not client.connected:
@@ -188,6 +191,7 @@ async def generate_video(body: GenerateVideoRequest):
                 project_id=body.project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
+                resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
             )
@@ -202,7 +206,7 @@ async def generate_video(body: GenerateVideoRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         result = await client.generate_video(
-            **body.model_dump(exclude={"model_family", "duration_s"}, exclude_none=True)
+            **body.model_dump(exclude={"model_family", "duration_s", "resolution"}, exclude_none=True)
         )
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
@@ -216,8 +220,8 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
     Existing requests default to ``model_family=veo``. Set
     ``model_family=omni_flash`` and ``duration_s`` to 4/6/8/10 to use Omni.
-    Omni responses include ``flowkitPolling.workflows``; poll those workflows,
-    not the operation-looking handles in the raw Flow response.
+    Migrated Omni Ingredients/R2V returns ``flowkitPolling.mode=batch_operation``;
+    poll its operations through ``/check-status``.
     """
     client = get_flow_client()
     if not client.connected:
@@ -231,6 +235,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
                 project_id=body.project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
+                resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
             )
@@ -238,7 +243,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         result = await client.generate_video_from_references(
-            **body.model_dump(exclude={"model_family", "duration_s"})
+            **body.model_dump(exclude={"model_family", "duration_s", "resolution"})
         )
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):

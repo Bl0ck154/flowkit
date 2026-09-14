@@ -586,9 +586,7 @@ async def test_submit_rejects_empty_reference_set():
         )
 
 
-class TestRemainingUnportedOmniBatchModesAreRefused:
-    """Only start+end/reference remain blocked; first-frame I2V is migrated."""
-
+class TestMigratedOmniReferenceBatchModes:
     @pytest.fixture(autouse=True)
     def batch_transport(self, monkeypatch):
         monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
@@ -597,25 +595,64 @@ class TestRemainingUnportedOmniBatchModesAreRefused:
     def client(self):
         with patch("agent.services.omni_flash.get_flow_client") as factory:
             stub = MagicMock()
-            stub._send = AsyncMock()
+            pid = "11111111-2222-3333-4444-555555555555"
+            stub._batch_project_id.return_value = pid
+            stub._batch_payload = AsyncMock(return_value=[
+                None, 50, [["op-ref-1", pid, "scene-1", None]],
+            ])
             factory.return_value = stub
             yield stub
 
-    async def test_first_last_names_the_gap_and_sends_nothing(self, client):
+    async def test_first_last_uses_nprqif_and_batch_operation_polling(self, client):
         result = await generate_omni_flash_first_last_video(
-            start_image_media_id="a", end_image_media_id="b",
-            prompt="go", project_id="pid")
-        assert "UNSUPPORTED_ON_BATCH_API" in result["error"]
-        client._send.assert_not_called()
+            start_image_media_id="start", end_image_media_id="end",
+            prompt="morph", project_id="pid", duration_s=4,
+            resolution="360p", aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE")
+        assert result["status"] == 200
+        assert result["data"]["model"] == "omni_flash_i2v_4s_first_last_360p"
+        assert result["data"]["resolution"] == "360p"
+        assert result["data"]["flowkitPolling"]["mode"] == "batch_operation"
+        rpcid, freq, captcha = client._batch_payload.await_args.args[:3]
+        assert rpcid == omni_flash.fb.RPC_GEN_VIDEO_FIRST_LAST
+        assert captcha == omni_flash.fb.CAPTCHA_VIDEO
+        payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
+        req = payload[0][0]
+        assert req[1] == "omni_flash_i2v_4s_first_last_360p"
+        assert req[4][1] == "start"
+        assert req[5][1] == "end"
+        client._remember_operation.assert_called_once_with(
+            "op-ref-1", "11111111-2222-3333-4444-555555555555")
 
-    async def test_reference_to_video_names_the_gap_and_sends_nothing(self, client):
+    async def test_reference_to_video_uses_mzza6b_and_all_references(self, client):
         result = await generate_omni_flash_video(
-            reference_media_ids=["a"], prompt="go", project_id="pid")
-        assert "UNSUPPORTED_ON_BATCH_API" in result["error"]
-        client._send.assert_not_called()
+            reference_media_ids=["a", "b", "c"], prompt="keep all refs",
+            project_id="pid", duration_s=6, resolution="720p",
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT")
+        assert result["status"] == 200
+        assert result["data"]["model"] == "abra_r2v_6s"
+        assert result["data"]["flowkitPolling"]["mode"] == "batch_operation"
+        rpcid, freq, _captcha = client._batch_payload.await_args.args[:3]
+        assert rpcid == omni_flash.fb.RPC_GEN_VIDEO_REFERENCES
+        payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
+        req = payload[0][0]
+        assert req[1] == [[None, "a"], [None, "b"], [None, "c"]]
+        assert req[2] == "abra_r2v_6s"
+        assert req[3] == omni_flash.fb.VIDEO_ASPECT_PORTRAIT
 
-    async def test_the_message_points_to_supported_text_to_video(self, client):
-        result = await generate_omni_flash_video(
-            reference_media_ids=["a"], prompt="go", project_id="pid")
-        assert "image-to-video and text-to-video are supported" in result["error"]
-        assert "reference-to-video" in result["error"]
+    async def test_reference_360p_uses_live_wire_model_and_quality_slot(self, client):
+        await generate_omni_flash_video(
+            reference_media_ids=["a", "b"], prompt="refs", project_id="pid",
+            duration_s=4, resolution="360p",
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE")
+        _rpcid, freq, _captcha = client._batch_payload.await_args.args[:3]
+        payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
+        req = payload[0][0]
+        assert req[2] == "abra_r2v_4s_360p"
+        assert req[-1] == [4]
+
+    async def test_invalid_resolution_is_rejected_before_submit(self, client):
+        with pytest.raises(ValueError, match="resolution must be 360p or 720p"):
+            await generate_omni_flash_first_frame_video(
+                start_image_media_id="a", prompt="go", project_id="pid",
+                resolution="1080p")
+        client._batch_payload.assert_not_called()
