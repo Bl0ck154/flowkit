@@ -189,8 +189,8 @@ One signed-in Flow tab has to stay open; nothing here works headless.
 > `aisandbox-pa.googleapis.com` REST API has no caller: the `Bearer ya29.…` it
 > needed stopped being minted. If you are upgrading from an older Flow Kit,
 > reload the extension (v0.3.0+) and pin `FLOW_PROJECT_ID` — see
-> [Configuration](#configuration). The legacy path is still there behind
-> `USE_BATCH_RPC=0`, but it is a post-mortem tool, not a fallback.
+> [Configuration](#configuration). The REST path has been removed; `git log`
+> has it if a payload is ever needed for reference.
 
 ## Quick Start
 
@@ -240,7 +240,6 @@ You can also pass `flow_project_id` per project on `POST /api/projects`.
 | Env var | Default | What it does |
 |---------|---------|--------------|
 | `FLOW_PROJECT_ID` | — | The Flow project every RPC is scoped to. Required. |
-| `USE_BATCH_RPC` | `1` | `0` falls back to the pre-migration REST path (dead auth). |
 | `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
 | `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
 
@@ -690,7 +689,6 @@ agent/
 │                         #   flow, models, providers, reviews, materials, music, tts)
 ├── services/
 │   ├── flow_client.py   # WS bridge to extension
-│   ├── headers.py       # Randomized browser headers
 │   ├── tts.py           # OmniVoice TTS (subprocess-based)
 │   ├── scene_chain.py   # Continuation scene logic
 │   ├── video_reviewer.py # AI vision review — contact sheet + claude/agy/codex CLI dispatch
@@ -805,13 +803,13 @@ These arrive in the response body as `data.error.details[].reason`. The worker a
 | Status | Source | Meaning | Handling |
 |--------|--------|---------|----------|
 | **400** | Flow API | Invalid payload, UNSAFE_GENERATION, entity not found (sometimes) | Route by `details.reason` — some are auto-recoverable, others terminal |
-| **401** | Flow API (legacy path only) | Bearer expired — on a post-migration profile it was never minted | Switch to the batch path (`USE_BATCH_RPC=1`) |
+| **401** | Flow API | Should not occur — batchexecute authenticates in the page, not with a bearer | Check the Flow tab is signed in; see `NO_AT_TOKEN` |
 | **403** | Extension (`background.js:432`) | `CAPTCHA_FAILED`, `NO_FLOW_TAB`, or `MODEL_ACCESS_DENIED` | CAPTCHA → retry loop; NO_FLOW_TAB → fail (user must open Flow); tier → fail |
 | **404** | Flow API | `media_id` not found (expired upload) | Same as "Requested entity was not found" — auto re-upload |
 | **429** | Flow API | Rate limited / quota | Back off + retry; if `USER_QUOTA_REACHED` appears, fail |
 | **500** | Flow backend **or** extension fetch exception (`background.js:504`) | Transient server error OR network drop during fetch | Retry with exponential backoff |
 | **502** | FastAPI default (`agent/api/flow.py:80,92`) | Extension returned error without explicit status | Retry; check extension health |
-| **503** | FastAPI (`api/flow.py`) | "Extension not connected" or `NO_FLOW_KEY` | Worker waits for reconnect — status set to PENDING, not FAILED |
+| **503** | FastAPI (`api/flow.py`) | "Extension not connected" | Worker waits for reconnect — status set to PENDING, not FAILED |
 | **504** | Agent | 60s timeout waiting for extension WS response | Treated as transient; re-queue PENDING |
 
 Status-code detection logic lives in `agent/worker/_parsing.py:_is_error` — a result is an error if `result.error` is set, `status >= 400`, **or** `data.error` is present.
@@ -825,7 +823,6 @@ String patterns in `error_message` that the worker recognizes:
 | `Extension not connected` | Chrome extension offline or WS dropped | 503 returned; worker re-queues PENDING and waits |
 | `extension reconnected` / `extension disconnected` | WS bounce mid-request | Re-queue PENDING without incrementing `retry_count` |
 | `extension_switched` | User switched Flow tabs mid-generation | Re-queue PENDING |
-| `NO_FLOW_KEY` | Extension has no captured bearer token — **legacy path only**, expected on the batch path | Only meaningful with `USE_BATCH_RPC=0` |
 | `NO_AT_TOKEN` | Flow tab is signed out, on an interstitial, or still booting | Open `flow.google.com`, sign in, let the app load |
 | `NO_FLOW_PROJECT` | No Flow project to scope the RPC to | Pin `FLOW_PROJECT_ID` — **terminal, not retried** |
 | `UNSUPPORTED_ON_BATCH_API` | Upscale / r2v / chaining — payload never captured | See `docs/CAPTURE.md` — **terminal, not retried** |

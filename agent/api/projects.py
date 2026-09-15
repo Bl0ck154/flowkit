@@ -7,7 +7,7 @@ import aiohttp
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agent.config import BASE_DIR, USE_BATCH_RPC
+from agent.config import BASE_DIR
 from agent.models.project import Project, ProjectCreate, ProjectUpdate
 from agent.models.character import Character
 from agent.sdk.persistence.sqlite_repository import SQLiteRepository
@@ -172,9 +172,9 @@ async def create(body: ProjectCreate):
 
     detected_tier = await _detect_user_tier(client)
 
-    # On the batch path Flow no longer creates projects for us — the uuid comes
-    # from the request or from FLOW_PROJECT_ID. The legacy path still mints one.
-    flow_project_id = client.flow_project_id(body.flow_project_id) if USE_BATCH_RPC else None
+    # Flow no longer creates projects for us — the uuid comes from the request
+    # or from FLOW_PROJECT_ID.
+    flow_project_id = client.flow_project_id(body.flow_project_id)
     if flow_project_id:
         logger.info("Flow project reused: %s", flow_project_id)
     else:

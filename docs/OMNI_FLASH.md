@@ -22,7 +22,7 @@ Use `http://127.0.0.1:8100` when the caller runs on the FlowKit host. For a remo
 
 ## Supported modes
 
-On `flow.google.com`, Omni **text-to-video** is migrated and live-verified. The older frame/reference implementations still use the pre-migration REST transport and remain fail-fast while `USE_BATCH_RPC=1`.
+On `flow.google.com`, Omni **text-to-video** is migrated and live-verified. Frame and reference generation had only a REST implementation; that transport has been removed, so they validate their inputs and then fail by name with `UNSUPPORTED_ON_BATCH_API` until their payloads are captured (see `docs/CAPTURE.md`).
 
 | Mode | Batch status | Endpoint | Internal model family |
 |---|---|---|---|

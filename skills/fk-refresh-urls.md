@@ -116,7 +116,7 @@ curl -X PATCH "http://127.0.0.1:8100/api/scenes/<SID>" \
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| `flow_key_present: false` | No bearer token — **expected on the batch path** | Ignore; only meaningful with `USE_BATCH_RPC=0` |
+| `flow_key_present: false` | No bearer token — **expected**; batchexecute authenticates in the page | Ignore |
 | `Extension not connected` | Chrome extension WS disconnected | Check the extension is enabled, refresh the Flow tab |
 | `refreshed: 0`, `found: 0` | No media ids stored for this project | Nothing to refresh — check the project id |
 | `refreshed: 0`, `found: N` | Every re-sign failed | Read the agent log; usually `NO_FLOW_TAB` or a signed-out Flow tab |

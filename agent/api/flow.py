@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
+from agent.config import FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
 from agent.services.flow_client import get_flow_client
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -122,15 +122,17 @@ class UpscaleImageRequest(BaseModel):
 
 @router.get("/status")
 async def extension_status():
-    """Extension health, and which transport it is being asked to speak.
+    """Extension health.
 
-    `flow_key_present` is a legacy-path signal: the batchexecute path has no
-    bearer token at all, so false is expected there rather than a fault.
+    `flow_key_present: false` is expected, not a fault: batchexecute
+    authenticates in the page and there is no bearer token to capture.
     """
     client = get_flow_client()
     return {
         "connected": client.connected,
-        "transport": "batch" if USE_BATCH_RPC else "legacy_rest",
+        # One transport now. The key stays so the documented pre-flight check
+        # (CLAUDE.md) keeps reading {"transport": "batch", ...}.
+        "transport": "batch",
         "flow_project_id": FLOW_PROJECT_ID or None,
         "allow_degraded": FLOW_ALLOW_DEGRADED,
         "flow_key_present": client._flow_key is not None,

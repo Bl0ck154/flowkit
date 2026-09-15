@@ -8,8 +8,10 @@
  * `Bearer ya29.…` the old REST host needed. The current path is `batch_rpc`:
  * the agent builds an `f.req` envelope, this worker mints a captcha for it and
  * runs the POST in the page's MAIN world, where the `at` CSRF token lives.
- * The bearer capture and `api_request` proxy below are the legacy path, kept
- * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
+ * The bearer capture and the `api_request` / `trpc_request` proxies below are
+ * the pre-migration path. The agent no longer sends either — it speaks only
+ * `batch_rpc`. They stay so an extension updated ahead of its agent keeps
+ * serving an older one; remove them once no agent in the wild sends them.
  */
 
 const AGENT_WS_URL = 'ws://127.0.0.1:9222';
@@ -643,8 +645,12 @@ async function handleTrpcRequest(msg) {
   }
 }
 
-// Legacy REST proxy against aisandbox-pa. Reachable only with USE_BATCH_RPC=0
-// on a profile that still holds a `Bearer ya29.…`; Flow stopped minting those.
+// Legacy REST proxy against aisandbox-pa. No current agent sends `api_request`;
+// kept only so an extension updated ahead of its agent still serves an older
+// one. It needs a `Bearer ya29.…` that Flow stopped minting, so it 401s on any
+// post-migration profile — as does sendTelemetry below, which early-returns
+// without a flowKey. Nothing here reaches aisandbox-pa any more; when the
+// oldest agent in the wild speaks batch_rpc, this and the host permission go.
 async function handleApiRequest(msg) {
   const { id, params } = msg;
   const { url, method, headers, body, captchaAction } = params;

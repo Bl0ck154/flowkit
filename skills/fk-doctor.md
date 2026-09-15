@@ -6,7 +6,7 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
 - `GET /health` returns `extension_connected: false`
-- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
+- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
@@ -67,25 +67,23 @@ Cross-reference `error_message` against the taxonomy below. Print: **Diagnosis /
 
 Match against taxonomy — even partial matches (`"not found"`, `"captcha"`, `"quota"`).
 
-## Which transport is running
+## The transport
 
-Since Flow moved to `flow.google.com` (September 2026) there are two paths, and
-the taxonomy below splits on which one is live:
+One path since Flow moved to `flow.google.com` (September 2026):
 
 ```bash
-python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
-  print('batch' if USE_BATCH_RPC else 'legacy REST', '| project:', FLOW_PROJECT_ID or 'UNPINNED')"
+python3 -c "from agent.config import FLOW_PROJECT_ID; \
+  print('batch | project:', FLOW_PROJECT_ID or 'UNPINNED')"
 ```
 
-- **batch** (default) — the agent builds an `f.req` envelope, the extension runs
-  it inside a signed-in `flow.google.com` tab. No bearer token exists on this
-  path, so `flow_key_present: false` in `/api/flow/status` is **normal**, not a
-  fault. Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
-- **legacy REST** (`USE_BATCH_RPC=0`) — the pre-migration `aisandbox-pa` path.
-  It needs a `Bearer ya29.…` Flow no longer mints, so it will 401 on any fresh
-  profile. Treat any report of it "suddenly breaking" as the migration, not a
-  regression: if `token_age_s` only climbs across tab reloads, the token is not
-  stale, it is gone.
+The agent builds an `f.req` envelope and the extension runs it inside a
+signed-in `flow.google.com` tab. **No bearer token exists on this path**, so
+`flow_key_present: false` in `/api/flow/status` is normal, not a fault.
+Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
+
+The `aisandbox-pa` REST path that preceded it has been removed — it needed a
+`Bearer ya29.…` Flow no longer mints. If an old report mentions it, that is the
+migration, not a regression.
 
 ## Error Taxonomy
 
@@ -106,13 +104,13 @@ python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
 | Status | Origin | When you see it |
 |--------|--------|-----------------|
 | **400** | Flow API | Invalid payload / UNSAFE / entity-not-found — **route by `details.reason`** |
-| **401** | Flow API (legacy path only) | Bearer expired — and on a post-migration profile it is not expired, it was never minted. Switch to the batch path |
+| **401** | Flow API | Should not happen — batchexecute authenticates in the page, not with a bearer. Check the Flow tab is signed in; see `NO_AT_TOKEN` |
 | **403** | Extension (`background.js:432`) | `CAPTCHA_FAILED`, `NO_FLOW_TAB`, or `MODEL_ACCESS_DENIED` — read the suffix |
 | **404** | Flow API | `media_id` not found — same handler as "entity not found" |
 | **429** | Flow API | Rate-limit or quota — backoff; if message mentions QUOTA_REACHED, terminal |
 | **500** | Flow backend **or** extension fetch exception (`background.js:504`) | Transient — retry with backoff |
 | **502** | FastAPI (`agent/api/flow.py:80,92`) | Extension returned error without explicit status — treat as transient |
-| **503** | FastAPI | "Extension not connected" or `NO_FLOW_KEY` — worker re-queues PENDING, waits |
+| **503** | FastAPI | "Extension not connected" — worker re-queues PENDING, waits |
 | **504** | Agent | 60s WS timeout waiting for extension — transient, re-queue |
 
 Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as an error if ANY of these hold:
@@ -127,7 +125,6 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `Extension not connected` | WS dropped or extension offline | Reload extension at `chrome://extensions`; worker auto-retries |
 | `extension reconnected` / `extension disconnected` | WS bounce mid-request | Auto re-queue, `retry_count` NOT incremented |
 | `extension_switched` | User switched active Flow tab | Auto re-queue |
-| `NO_FLOW_KEY` | No bearer token captured — **legacy path only**; expected and harmless on the batch path | Only meaningful with `USE_BATCH_RPC=0`; otherwise ignore |
 | `NO_FLOW_TAB` | No Flow tab for CAPTCHA solve or RPC signing | Open `https://flow.google.com/` and sign in |
 | `Failed to fetch` | Network drop inside service worker | Auto-retry with backoff |
 | WS 60s timeout | Extension hung | Reload extension; worker re-queues |
@@ -141,7 +138,7 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `FLOW_TAB_DISCARDED` | Chrome discarded the backgrounded tab and the reload did not revive it | Retried with backoff | Pin the Flow tab, or keep its window visible |
 | `NO_FLOW_PROJECT` | No Flow project to scope the RPC to | **Terminal — not retried** | Create a project in the Flow UI, pin its uuid as `FLOW_PROJECT_ID` (or pass `flow_project_id` on `POST /api/projects`) |
 | `UNSUPPORTED_ON_BATCH_API` | A capability whose payload was never captured off the new UI: **video upscale**, **r2v**, **start+end-frame chaining** | **Terminal — not retried** | For chaining and r2v, `FLOW_ALLOW_DEGRADED=1` falls back to plain i2v off the start frame. Upscale has no fallback. Real fix: capture the payload — `docs/CAPTURE.md` |
-| `UNSUPPORTED_ON_BATCH_API: Omni Flash` | Omni speaks the pre-migration REST + tRPC endpoints; no batchexecute payload captured | **Terminal — not retried** | Use `model_family=veo`, or `USE_BATCH_RPC=0` on a profile that still holds a bearer |
+| `UNSUPPORTED_ON_BATCH_API: Omni Flash` | Omni frame/reference had only a REST implementation; no batchexecute payload captured | **Terminal — not retried** | Use `model_family=veo`, or Omni **text-to-video**, which is migrated |
 | `PUBLIC_ERROR_UNUSUAL_ACTIVITY` | A reCAPTCHA token was replayed — they are single-use | Retried as a captcha error | Usually self-clears; if it persists the extension is reusing a token, reload it |
 | `no ogiZ0b envelope in response` | The RPC answered but not with the payload we came for — usually a signed-out page returning an HTML redirect | Retried with backoff | Re-sign in on the Flow tab |
 | `Polling timeout after Ns: Media not found.` | The job never produced media inside the budget | Terminal after `MAX_RETRIES` | The quoted complaint is a **diagnostic, not the cause** — finished jobs report it too. Check the Flow UI: if the clip is there, raise `VIDEO_POLL_TIMEOUT` |
@@ -191,7 +188,7 @@ When the user describes a symptom in plain language, map it here first.
 | Problem | Solution |
 |---------|----------|
 | Extension shows "Agent disconnected" | Start `python -m agent.main` |
-| Extension shows "No token" | Expected on the batch path — there is no bearer any more. Only act on it with `USE_BATCH_RPC=0` |
+| Extension shows "No token" | Expected — there is no bearer any more. Not a fault |
 | `CAPTCHA_FAILED: NO_FLOW_TAB` | Open `https://flow.google.com/` — and check the extension is v0.3.0+, older builds only matched the dead labs.google URL and could not see the tab that was right there |
 | 403 `MODEL_ACCESS_DENIED` | Tier mismatch — `GET /api/flow/credits`, downgrade model in `models.json` via `/fk-change-model` |
 | 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Google flagged the session as bot-like (rapid bursts, VPN/shared IP, stale cookies). **Pause submits**, then in Chrome: `chrome://settings/cookies` → remove cookies for `google.com` and `labs.google` → reload `flow.google.com` → sign in & solve any captcha → resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
@@ -224,7 +221,6 @@ Always end with a prescription block:
 Symptom:     <what the user observed>
 Root cause:  <what actually went wrong>
 Layer:       Flow | Extension | FastAPI | Worker | YouTube | Env
-Transport:   batch (flow.google.com) | legacy REST (aisandbox-pa)
 Auto-handler: <which branch of _handle_failure fires, or "none — terminal">
 
 === FIX ===

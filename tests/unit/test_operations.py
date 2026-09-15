@@ -160,6 +160,60 @@ class TestGenerateSceneImage:
 
 
 # ---------------------------------------------------------------------------
+# Test: generate_scene_video — the retry branch
+# ---------------------------------------------------------------------------
+
+class TestGenerateSceneVideoRetry:
+    """A retry must re-poll a submitted render, never resubmit it.
+
+    This is the one branch where a wrong answer costs money: resubmitting
+    abandons a render Flow is already paying for and starts a second one. It
+    was previously gated on the transport (`bare_uuid and not USE_BATCH_RPC`),
+    which made it dead on the only transport that exists, so it went untested.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_submitted_operation_is_repolled_not_resubmitted(
+            self, service, base_scene, mock_client):
+        mock_client.generate_video = AsyncMock()
+        polled = {"data": {"operations": [{"status": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}]}}
+
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._build_video_prompt",
+                   new=AsyncMock(return_value="p")), \
+             patch("agent.sdk.services.operations._poll_operations",
+                   new=AsyncMock(return_value=polled)) as mock_poll:
+            mock_crud.get_project = AsyncMock(return_value={"user_paygate_tier": "PAYGATE_TIER_ONE"})
+            mock_crud.get_request = AsyncMock(return_value={"request_id": SAMPLE_UUID_2})
+
+            result = await service.generate_scene_video(
+                base_scene, "VERTICAL", request_id="req-1")
+
+        mock_client.generate_video.assert_not_called()
+        assert mock_poll.await_args.args[1][0]["operation"]["name"] == SAMPLE_UUID_2
+        assert result is polled
+
+    @pytest.mark.asyncio
+    async def test_no_prior_operation_still_submits(self, service, base_scene, mock_client):
+        """The complement — the guard must not swallow a first attempt."""
+        mock_client.generate_video = AsyncMock(
+            return_value={"data": {"operations": [{"operation": {"name": "op-new"}}]}})
+
+        with patch("agent.sdk.services.operations.crud") as mock_crud, \
+             patch("agent.sdk.services.operations._build_video_prompt",
+                   new=AsyncMock(return_value="p")), \
+             patch("agent.sdk.services.operations._poll_operations",
+                   new=AsyncMock(return_value={"data": {}})):
+            mock_crud.get_project = AsyncMock(return_value={"user_paygate_tier": "PAYGATE_TIER_ONE"})
+            mock_crud.get_request = AsyncMock(return_value=None)
+            mock_crud.update_request = AsyncMock()
+
+            await service.generate_scene_video(base_scene, "VERTICAL", request_id="req-1")
+
+        mock_client.generate_video.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Test: edit_scene_image
 # ---------------------------------------------------------------------------
 
