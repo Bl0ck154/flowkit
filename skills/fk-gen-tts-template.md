@@ -16,55 +16,43 @@ Source: https://github.com/tuannguyenhoangit-droid/OmniVoice
 
 > **Windows users:** Run all setup commands inside **WSL** or **Git Bash** (not CMD/PowerShell). The project's `setup.sh` and all bash scripts require a Unix shell.
 
-**Step 1 — Install PyTorch** (in the FlowKit launcher venv, or a separate venv if you set
-`TTS_PYTHON_BIN`):
+**Step 1 — Install PyTorch** (in a fresh venv recommended):
 
 ```bash
 # macOS Apple Silicon (CPU — recommended for GLA, MPS produces gibberish)
-$HOME/.venvs/flowkit/bin/python -m pip install torch==2.8.0 torchaudio==2.8.0
+pip install torch==2.8.0 torchaudio==2.8.0
 
 # Linux / WSL with NVIDIA GPU
-python -m pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 \
-  --extra-index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0+cu128 torchaudio==2.8.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 
 # Linux / WSL CPU-only
-python -m pip install torch==2.8.0 torchaudio==2.8.0
+pip install torch==2.8.0 torchaudio==2.8.0
 ```
 
 **Step 2 — Install OmniVoice** (choose one):
 
 ```bash
 # From PyPI (stable)
-$HOME/.venvs/flowkit/bin/python -m pip install omnivoice
+pip install omnivoice
 
 # From source
-$HOME/.venvs/flowkit/bin/python -m pip install \
-  git+https://github.com/k2-fsa/OmniVoice.git
+pip install git+https://github.com/k2-fsa/OmniVoice.git
 
 # Dev install
-git clone https://github.com/k2-fsa/OmniVoice.git
-cd OmniVoice
-$HOME/.venvs/flowkit/bin/python -m pip install -e .
+git clone https://github.com/k2-fsa/OmniVoice.git && cd OmniVoice && pip install -e .
 ```
 
-**Step 3 — Verify installation:**
+**Step 3 — Point GLA to the right Python** (if OmniVoice is in a separate venv):
 
 ```bash
-$HOME/.venvs/flowkit/bin/python -c \
-  'from omnivoice import OmniVoice; print("OmniVoice OK")'
+export TTS_PYTHON_BIN=/path/to/omnivoice-venv/bin/python3
 ```
 
-FlowKit's local TTS subprocess defaults to the interpreter that launched FlowKit
-(`sys.executable`). `TTS_PYTHON_BIN` is optional and is only needed when OmniVoice
-is installed in another venv.
+If OmniVoice is installed in the same env as the agent, no extra config needed.
 
-For remote GPU inference, run `agent/omnivoice_api.py` as a separate FastAPI service.
-The FlowKit remote backend uploads `ref_audio` bytes and expects raw `audio/wav` bytes
-back; it never sends a local filesystem path to the remote service.
-
-**HuggingFace mirror** (if model download is slow):
+**Verify installation:**
 ```bash
-export HF_ENDPOINT="https://hf-mirror.com"
+python3 -c "from omnivoice import OmniVoice; print('OK')"
 ```
 
 **HuggingFace mirror** (if model download is slow):
