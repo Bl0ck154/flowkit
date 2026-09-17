@@ -427,6 +427,9 @@ def text_video_request(prompt: str, project_id: str,
         [request],
         _context(project_id),
         [_client_uuid(), 1],
+    ])
+
+
 def upscale_request(media_id: str, project_id: str,
                     aspect: Any = VIDEO_ASPECT_LANDSCAPE,
                     model: str = "veo_3_1_upsampler_1080p") -> str:
@@ -541,6 +544,8 @@ def read_upscaled_image(payload: Any) -> str:
     if not isinstance(encoded, str) or len(encoded) < 100:
         raise FlowBatchError("image upscale response carried no encoded image")
     return encoded
+
+
 def read_upscaled_media_id(payload: Any) -> str:
     """Return the media id created by the p0UkFb upscale submit."""
     for text in _walk_strings(payload):
