@@ -32,7 +32,6 @@ def client(monkeypatch):
     envelope as well as on what came back.
     """
     import agent.services.flow_client as module
-    monkeypatch.setattr(module, "USE_BATCH_RPC", True)
     monkeypatch.setattr(module, "FLOW_PROJECT_ID", PROJECT)
     monkeypatch.setattr(module, "FLOW_ALLOW_DEGRADED", False)
 

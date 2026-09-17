@@ -15,19 +15,12 @@ API_PORT = int(os.environ.get("API_PORT", "8100"))
 WS_HOST = os.environ.get("WS_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("WS_PORT", "9222"))
 
-# ─── Google Flow API ────────────────────────────────────────
-# Legacy REST host. Flow moved to flow.google.com in September 2026 and stopped
-# minting the `Bearer ya29.…` this host needs, so these are only reachable with
-# USE_BATCH_RPC=0 on a browser profile that still has an old token.
-GOOGLE_FLOW_API = "https://aisandbox-pa.googleapis.com"
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY")
-RECAPTCHA_SITE_KEY = os.environ.get("RECAPTCHA_SITE_KEY", "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV")
 
-# ─── Flow batchexecute (the current path) ───────────────────
+# ─── Flow batchexecute ──────────────────────────────────────
 # Every call is signed in the page with the session cookie plus a per-page `at`
-# token, so the extension runs it inside a signed-in flow.google.com tab. Set
-# USE_BATCH_RPC=0 only to fall back to the dead REST path for a post-mortem.
-USE_BATCH_RPC = os.environ.get("USE_BATCH_RPC", "1") == "1"
+# token, so the extension runs it inside a signed-in flow.google.com tab. This
+# is the only transport; the REST path it replaced was removed once Flow stopped
+# minting the bearer it needed.
 
 # The Flow project every RPC is scoped to. Project creation went with the old
 # labs.google tRPC endpoint, so a project is made once in the Flow UI and its
@@ -65,20 +58,6 @@ IMAGE_MODELS = _MODELS["image_models"]
 # batch path also accepts syntactically valid Flow wire model ids directly so
 # newly introduced image models do not require a Flow Kit release.
 DEFAULT_IMAGE_MODEL = _MODELS.get("default_image_model", "NANO_BANANA_PRO")
-
-# ─── API Endpoints ───────────────────────────────────────────
-ENDPOINTS = {
-    "generate_images": "/v1/projects/{project_id}/flowMedia:batchGenerateImages",
-    "generate_video": "/v1/video:batchAsyncGenerateVideoStartImage",
-    "generate_video_start_end": "/v1/video:batchAsyncGenerateVideoStartAndEndImage",
-    "generate_video_references": "/v1/video:batchAsyncGenerateVideoReferenceImages",
-    "upscale_video": "/v1/video:batchAsyncGenerateVideoUpsampleVideo",
-    "upscale_image": "/v1/flow/upsampleImage",
-    "upload_image": "/v1/flow/uploadImage",
-    "check_video_status": "/v1/video:batchCheckAsyncVideoGenerationStatus",
-    "get_credits": "/v1/credits",
-    "get_media": "/v1/media/{media_id}",
-}
 
 # ─── Output Directories ─────────────────────────────────────
 OUTPUT_DIR = BASE_DIR / "output"
@@ -131,29 +110,3 @@ SUNO_CALLBACK_URL = os.environ.get("SUNO_CALLBACK_URL", f"http://{API_HOST}:{API
 SUNO_POLL_INTERVAL = int(os.environ.get("SUNO_POLL_INTERVAL", "5"))
 SUNO_POLL_TIMEOUT = int(os.environ.get("SUNO_POLL_TIMEOUT", "600"))
 
-# ─── Header Randomization Pools ─────────────────────────────
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
-]
-
-CHROME_VERSIONS = [
-    '"Google Chrome";v="109", "Chromium";v="109"',
-    '"Google Chrome";v="110", "Chromium";v="110"',
-    '"Google Chrome";v="111", "Chromium";v="111"',
-    '"Google Chrome";v="113", "Not-A.Brand";v="24"',
-    '"Google Chrome";v="120", "Not-A.Brand";v="24"',
-    '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
-]
-
-BROWSER_VALIDATIONS = [
-    "SgDQo8mvrGRdD61Pwo8wyWVgYgs=",
-]
-
-CLIENT_DATA = [
-    "CKi1yQEIh7bJAQiktskBCKmdygEIvorLAQiUocsBCIagzQEYv6nKARjRp88BGKqwzwE=",
-]

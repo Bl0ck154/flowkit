@@ -40,7 +40,7 @@ def _char_matches(c: dict, name_set: set) -> bool:
 import aiohttp
 
 from agent.db import crud
-from agent.config import USE_BATCH_RPC, VIDEO_POLL_INTERVAL, VIDEO_POLL_TIMEOUT
+from agent.config import VIDEO_POLL_INTERVAL, VIDEO_POLL_TIMEOUT
 from agent.utils.paths import scene_4k_path
 from agent.utils.slugify import slugify
 from agent.worker._parsing import (
@@ -447,28 +447,19 @@ class OperationService:
             base_prompt = scene.get("video_prompt") or scene.get("prompt", "")
         prompt = await _build_video_prompt(base_prompt, scene, pid)
 
-        # Check if already submitted (op_name saved from previous attempt)
-        # OLD schema (Lite/Fast/Ultra): op_name is "models/.../operations/..." → re-poll via check_video_status
-        # NEW schema (Low Priority workflow): op_name is bare UUID → cannot recover (need primary_media_id
-        # which isn't persisted yet); fall through and resubmit (Low Priority is free, duplicate is OK)
+        # Already submitted on a previous attempt? Re-poll it.
         existing_op = None
         if request_id:
             req_row = await crud.get_request(request_id)
             existing_op = req_row.get("request_id") if req_row else None
 
-        # A bare uuid means different things on the two transports. On the
-        # legacy path it is a Low Priority workflow name that cannot be
-        # re-polled, so the retry resubmits. On the batch path it is the
-        # operation id, and looking it up in the project listing is exactly
-        # what the status poll does — resubmitting there would abandon a
-        # running render and pay for a second one.
-        bare_uuid = bool(existing_op and len(existing_op) == 36 and existing_op.count("-") == 4)
-        looks_like_workflow_uuid = bare_uuid and not USE_BATCH_RPC
-        if existing_op and not looks_like_workflow_uuid:
+        # A bare uuid is the operation id, and looking it up in the project
+        # listing is exactly what the status poll does — resubmitting instead
+        # would abandon a running render and pay for a second one.
+        if existing_op:
             logger.info("Video gen already submitted (op=%s), re-polling", existing_op[:30])
             operations = [{"operation": {"name": existing_op}, "status": "MEDIA_GENERATION_STATUS_PENDING"}]
             return await _poll_operations(self._client, operations)
-        # else: workflow UUID — fall through and resubmit fresh
 
         submit_result = await self._client.generate_video(
             start_image_media_id=image_media_id,

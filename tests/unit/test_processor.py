@@ -139,8 +139,7 @@ class TestHandleFailure:
         rid = req["id"]
         result = {"error": "timeout"}
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
@@ -158,8 +157,7 @@ class TestHandleFailure:
         rid = req["id"]
         result = {"error": "permanent failure"}
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
@@ -185,8 +183,7 @@ class TestHandleFailure:
             }
         }
 
-        with patch("agent.worker.processor.crud") as mock_crud, \
-             patch("agent.worker.processor._retry_state", {}):
+        with patch("agent.worker.processor.crud") as mock_crud:
             mock_crud.update_request = AsyncMock()
             mock_crud.update_scene = AsyncMock()
             await _handle_failure(rid, req, result)
