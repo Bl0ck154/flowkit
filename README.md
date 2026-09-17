@@ -36,38 +36,6 @@
 
 ---
 
-### ☕ Sponsor this project
-
-<table align="center">
-  <tr>
-    <td align="center" width="50%">
-      <a href="docs/images/sponsor-qr-vn.jpg">
-        <img src="docs/images/sponsor-qr-vn.jpg" alt="Vietnam QR — MoMo / VietQR / napas247" width="240" />
-      </a><br/>
-      <sub>📱 <b>Vietnam</b><br/>MoMo · VietQR · napas247</sub>
-    </td>
-    <td align="center" width="50%">
-      <a href="docs/images/sponsor-qr-binance.png">
-        <img src="docs/images/sponsor-qr-binance.png" alt="Binance Pay QR — Cris Ng" width="240" />
-      </a><br/>
-      <sub>💰 <b>Binance Pay</b><br/>Crypto / cross-border</sub>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  🌍 <b>International (card):</b>
-  <a href="https://ko-fi.com/crisnguyen95">
-    <img src="https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-FF5E5B?logo=kofi&logoColor=white" alt="Ko-fi" />
-  </a>
-</p>
-
-<p align="center">
-  <sub><i>(yes — I moved this up here on purpose. Was afraid nobody scrolls past the badges 😅)</i></sub>
-</p>
-
----
-
 # FLOW KIT
 
 Standalone system to generate AI videos via Google Flow. Uses a Chrome extension as a browser bridge: it mints reCAPTCHA and runs Flow's batchexecute RPCs inside a signed-in `flow.google.com` tab, which is the only place they can be signed.
@@ -888,6 +856,37 @@ From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
 | "Requested entity was not found" spam | Image URLs expired — re-upload via `POST /api/upload-image` or wait for auto-recovery |
 | YouTube upload `invalidTags` | Tag-char overflow; reduce tags (quote overhead bytes count) |
 | Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
+
+## Changelog
+
+Dates are merge dates. Older releases are tagged; `git log` is the full record.
+
+### Unreleased — the Flow migration
+
+Flow moved to `flow.google.com` in September 2026 and stopped minting the bearer
+token the old REST API needed. Everything below is that migration.
+
+| Date | Change |
+|---|---|
+| 2026-09-18 | Omni 1.1 Flash first-frame, first+last and reference modes ported to `batchexecute` ([#48](../../pull/48), [#50](../../pull/50)). Unported capabilities drop from four to three, all on the Veo path |
+| 2026-09-17 | REST transport removed — the ten `_legacy_*` methods, the `USE_BATCH_RPC` branches, the fingerprint pools and `agent/services/headers.py`; net −1043 lines ([#49](../../pull/49)) |
+| 2026-09-17 | Migrated image API: variant submit, settled-wave retry, and 2K/4K image export via `SPrCad` ([#42](../../pull/42)) |
+| 2026-09-15 | Video submit unified across the frame and reference paths ([#46](../../pull/46)) |
+| 2026-09-15 | Omni Flash text-to-video on the batch path ([#41](../../pull/41)) |
+| 2026-09-15 | Extension: idle-tab leak fixed ([#44](../../pull/44)) |
+| 2026-09-07 | `batchexecute` transport added — the agent builds the envelope, the extension signs it inside a signed-in Flow tab ([#39](../../pull/39)) |
+
+### Earlier
+
+| Date | Change |
+|---|---|
+| 2026-08-18 | Omni Flash generation ([#30](../../pull/30)); MV3 flow-key bootstrap ([#24](../../pull/24)) |
+| 2026-08-04 | Web dashboard rebuilt with the real pipeline UI, a guide page and i18n |
+| 2026-08-04 | Video review: contact sheets split by duration rather than one giant tile; `agy` and `codex` added as review CLI providers |
+| 2026-08-04 | Skill files standardised on `fk-<name>` |
+| 2026-05-09 | `v1.1.0` |
+| 2026-04-27 | `v1.0.2` |
+| 2026-04-22 | `v1.0.1` |
 
 ## License
 
