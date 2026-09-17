@@ -1,0 +1,74 @@
+# Nothing ran the tests on push or PR before this, so a broken main was only
+# ever caught by hand. PR #48 reached `main` carrying an ImportError against a
+# module a merged PR had deleted; this job is what catches that class of thing.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    # The suite takes ~7s. A ceiling this generous only ever trips on a hang,
+    # which this suite has had before: an aiosqlite connection left open keeps a
+    # non-daemon worker thread alive and the interpreter never exits.
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the README advertises, and the version development runs on.
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install ffmpeg
+        # fonts-dejavu-core is not optional. The drawtext call in
+        # video_reviewer.py passes no fontfile=, so it asks fontconfig for a
+        # default family; with --no-install-recommends the runner can end up
+        # with an ffmpeg that has drawtext and no font for it to use.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Assert drawtext actually renders
+        # 13 of these tests burn a timestamp into extracted frames. Checking
+        # `ffmpeg -filters` only proves the filter is compiled in, not that a
+        # font exists, so render one frame through the same filter the tests
+        # use. Both failure modes surface here with a message that says what is
+        # wrong, instead of as 13 tests failing on "Filter not found".
+        run: |
+          ffmpeg -hide_banner -loglevel error \
+            -f lavfi -i "testsrc=duration=1:size=320x240:rate=5" \
+            -vf "drawtext=text='%{pts\:hms}':x=5:y=5:fontsize=14:fontcolor=white:borderw=1:bordercolor=black" \
+            -frames:v 1 -y /tmp/drawtext-smoke.jpg || {
+              echo "::error::ffmpeg cannot render drawtext — missing --enable-libfreetype, or no font installed."
+              ffmpeg -hide_banner -version | head -3
+              exit 1
+            }
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run unit tests
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python -m pytest tests/unit -q
