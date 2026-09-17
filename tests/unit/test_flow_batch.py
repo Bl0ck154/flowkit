@@ -194,7 +194,7 @@ class TestReaders:
             "status": "CAE",
         }
 
-def test_image_upscale_reads_synchronous_encoded_image(self):
+    def test_image_upscale_reads_synchronous_encoded_image(self):
         assert fb.read_upscaled_image([["media"], "A" * 200]) == "A" * 200
         with pytest.raises(fb.FlowBatchError):
             fb.read_upscaled_image([["media"], "short"])
