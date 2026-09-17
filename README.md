@@ -24,12 +24,15 @@
 > from an older Flow Kit: reload the extension (v0.3.2+) and pin
 > `FLOW_PROJECT_ID`; Flow Kit can no longer create the project for you.
 >
-> Four capabilities are still unported because their payloads were never
-> captured off the new UI — **video upscale**, **reference-to-video (r2v)**,
-> **start+end-frame chaining**, and **Omni Flash frame/reference**. They fail
-> loudly with `UNSUPPORTED_ON_BATCH_API` instead of quietly producing the wrong
-> thing. `FLOW_ALLOW_DEGRADED=1` drops chaining and r2v to plain i2v; video
-> upscale has no fallback. To restore one properly see [`docs/CAPTURE.md`](docs/CAPTURE.md).
+> Every Omni 1.1 Flash video mode is ported and live-verified: text-to-video,
+> first frame, first+last frame, and references. Three capabilities remain
+> unported on the **Veo** path because their payloads were never captured off
+> the new UI — **video upscale**, **Veo reference-to-video**, and **Veo
+> start+end-frame chaining**. They fail loudly with `UNSUPPORTED_ON_BATCH_API`
+> instead of quietly producing the wrong thing. For the latter two, Omni covers
+> the same shot with `model_family=omni_flash`, or `FLOW_ALLOW_DEGRADED=1` drops
+> them to plain i2v; video upscale has no fallback. To restore one properly see
+> [`docs/CAPTURE.md`](docs/CAPTURE.md).
 
 ---
 
@@ -276,10 +279,10 @@ Three capabilities have no captured payload, so they fail with
 | Capability | Status | Workaround |
 |---|---|---|
 | 4K/1080p upscale (`/fk-pipeline` last step) | unported | none — keep the 1080p render |
-| Reference-to-video (r2v) | unported | `FLOW_ALLOW_DEGRADED=1` → i2v off the first reference |
-| Start+end-frame chaining (`/fk-gen-chain-videos`) | unported | `FLOW_ALLOW_DEGRADED=1` → i2v off the start frame |
+| Veo reference-to-video (r2v) | unported | Omni r2v (`model_family=omni_flash`), or `FLOW_ALLOW_DEGRADED=1` → i2v off the first reference |
+| Veo start+end-frame chaining (`/fk-gen-chain-videos`) | unported | Omni first+last (`model_family=omni_flash`), or `FLOW_ALLOW_DEGRADED=1` → i2v off the start frame |
 | Omni Flash text-to-video | ported | `POST /api/flow/generate-video-omni-text` (4/6/8/10s) |
-| Omni Flash frame/reference modes | unported | use Veo or text-to-video until their batch payloads are captured |
+| Omni Flash frame / first+last / reference modes | ported | `eb1hJf`, `nprQif`, `MZZa6b` — `POST /api/flow/generate-video` with `model_family=omni_flash` |
 
 Restoring one starts with a capture, not a guess: [`docs/CAPTURE.md`](docs/CAPTURE.md).
 
