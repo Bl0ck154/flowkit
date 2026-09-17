@@ -6,7 +6,7 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
 - `GET /health` returns `extension_connected: false`
-- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
+- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `NO_INJECTION_RESULT`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
@@ -136,6 +136,7 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `NO_AT_TOKEN` | The Flow tab loaded but `WIZ_global_data.SNlM0e` is absent — the page is signed out, on an interstitial, or still booting | Retried with backoff | Open `https://flow.google.com/`, confirm you are signed in, let the app finish loading |
 | `NO_FLOW_TAB` | No Flow tab to sign the request | Extension opens one and retries once | Leave one signed-in Flow tab open; nothing here works headless |
 | `FLOW_TAB_DISCARDED` | Chrome discarded the backgrounded tab and the reload did not revive it | Retried with backoff | Pin the Flow tab, or keep its window visible |
+| `NO_INJECTION_RESULT` | `chrome.scripting.executeScript` resolved with no frame result (`background.js:540`), so the envelope never ran — the Flow tab went away or was still booting at the moment of the call. Most likely on the first captcha-bearing RPC after an agent restart | Retried with backoff, counts against `MAX_RETRIES` | Usually transient — retry first. Rule out the lookalikes before digging: a failed mint reports `CAPTCHA_FAILED`, an oversized payload is not it (`MAX_RPC_TEXT` is 32 MB), and a structured-clone failure surfaces as 500, not 502. If it repeats, pin the Flow tab and reload the extension |
 | `NO_FLOW_PROJECT` | No Flow project to scope the RPC to | **Terminal — not retried** | Create a project in the Flow UI, pin its uuid as `FLOW_PROJECT_ID` (or pass `flow_project_id` on `POST /api/projects`) |
 | `UNSUPPORTED_ON_BATCH_API` | A capability whose payload was never captured off the new UI: **video upscale**, **r2v**, **start+end-frame chaining** | **Terminal — not retried** | For chaining and r2v, `FLOW_ALLOW_DEGRADED=1` falls back to plain i2v off the start frame. Upscale has no fallback. Real fix: capture the payload — `docs/CAPTURE.md` |
 | `UNSUPPORTED_ON_BATCH_API: Omni Flash` | Omni frame/reference had only a REST implementation; no batchexecute payload captured | **Terminal — not retried** | Use `model_family=veo`, or Omni **text-to-video**, which is migrated |
