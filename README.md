@@ -861,13 +861,14 @@ From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
 
 Dates are merge dates. Older releases are tagged; `git log` is the full record.
 
-### Unreleased — the Flow migration
+### v1.2.0 — 2026-09-18 — the Flow migration
 
 Flow moved to `flow.google.com` in September 2026 and stopped minting the bearer
 token the old REST API needed. Everything below is that migration.
 
 | Date | Change |
 |---|---|
+| 2026-09-18 | `/health` reports the app's real version again — it had been pinned at `0.2.0` since v0.2.0 while the app said `1.1.0`, because only one of the two literals was ever bumped ([#52](../../pull/52)) |
 | 2026-09-18 | Omni 1.1 Flash first-frame, first+last and reference modes ported to `batchexecute` ([#48](../../pull/48), [#50](../../pull/50)). Unported capabilities drop from four to three, all on the Veo path |
 | 2026-09-17 | REST transport removed — the ten `_legacy_*` methods, the `USE_BATCH_RPC` branches, the fingerprint pools and `agent/services/headers.py`; net −1043 lines ([#49](../../pull/49)) |
 | 2026-09-17 | Migrated image API: variant submit, settled-wave retry, and 2K/4K image export via `SPrCad` ([#42](../../pull/42)) |
