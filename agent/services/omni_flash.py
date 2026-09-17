@@ -1,13 +1,14 @@
 """Gemini Omni Flash video generation through the Google Flow bridge.
 
-What works today: **text-to-video**, on flow.google.com batchexecute. It submits
-through ``fb.text_video_request`` like every other migrated call.
+Migrated ``flow.google.com`` batch surfaces live-verified on 2026-09-14:
 
-What does not: first-frame, first+last, and reference-to-video. Those three were
-only ever implemented against the pre-migration REST endpoints, and that
-transport was removed when Flow stopped minting the bearer it needed. Their
-migrated payloads have not been captured, so they validate their inputs and then
-fail by name — see ``docs/CAPTURE.md`` for how to record one off the new UI.
+* text -> video: ``YhhmEf`` + ``abra_t2v_<duration>s`` (workflow/media polling)
+* first frame -> video: ``eb1hJf`` + ``abra_i2v_<duration>s``
+* first + last frame -> video: ``nprQif`` + ``omni_flash_i2v_<duration>s_first_last``
+* Ingredients/references -> video: ``MZZa6b`` + ``abra_r2v_<duration>s``
+
+Reference-conditioned modes return normal batch operation receipts and use the
+same operation/media poller as migrated Veo.
 
 Duration-specific model keys live in ``agent/models.json`` so a rollout that
 rotates a wire key does not need a code release.
@@ -25,17 +26,6 @@ from agent.services import flow_batch as fb
 from agent.services.flow_client import get_flow_client
 
 _MODELS_FILE = Path(__file__).parent.parent / "models.json"
-
-#: Frame and reference generation had only a REST implementation, and that
-#: transport is gone. Failing by name here beats dying on a 401 five retries
-#: deep, and names the thing a capture would restore.
-_UNSUPPORTED_ON_BATCH = (
-    "UNSUPPORTED_ON_BATCH_API: Omni Flash frame/reference generation is not yet "
-    "ported to flow.google.com batchexecute. Omni text-to-video is supported on "
-    "the batch path; frame-to-video, start+end and reference-to-video still need "
-    "their migrated payload captures."
-)
-
 
 OMNI_FLASH_VALID_DURATIONS = (4, 6, 8, 10)
 OMNI_FLASH_VALID_ASPECTS = {
@@ -61,6 +51,34 @@ def _validate_aspect(aspect_ratio: str) -> None:
             f"Omni Flash aspect ratio {aspect_ratio!r} is unsupported; "
             "use VIDEO_ASPECT_RATIO_PORTRAIT or VIDEO_ASPECT_RATIO_LANDSCAPE"
         )
+
+
+def _validate_resolution(resolution: str) -> str:
+    value = str(resolution or "720p").strip().lower()
+    if value not in {"360p", "720p"}:
+        raise ValueError("Omni Flash resolution must be 360p or 720p")
+    return value
+
+
+def _batch_operation_result(operation, project_id: str, model: str, duration_s: int, resolution: str) -> dict:
+    pending = {
+        "operation": {"name": operation.operation_id},
+        "status": "MEDIA_GENERATION_STATUS_PENDING",
+    }
+    return {
+        "status": 200,
+        "data": {
+            "operations": [pending],
+            "model": model,
+            "duration_s": duration_s,
+            "resolution": resolution,
+            "flowkitPolling": {
+                "mode": "batch_operation",
+                "project_id": project_id,
+                "operations": [pending],
+            },
+        },
+    }
 
 
 def _load_model_key(duration_s: int, mode: str = "reference_to_video") -> str:
@@ -204,19 +222,48 @@ async def _submit_omni_frame_video(
     project_id: str,
     scene_id: str = "",
     duration_s: int = 8,
+    resolution: str = "720p",
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
 ) -> dict:
-    """Submit Omni first-frame or First+Last generation."""
-    _validate_frame_inputs(
-        start_image_media_id,
-        end_image_media_id,
-        duration_s,
-        aspect_ratio,
-    )
-    return {"error": _UNSUPPORTED_ON_BATCH}
+    """Submit Omni first-frame or First+Last generation.
 
+    Batch payloads were live-captured from ``flow.google.com`` on 2026-09-14:
+    first-frame uses ``eb1hJf``; First+Last uses ``nprQif``. Both return normal
+    batch operations and are polled through ``/api/flow/check-status``.
+    """
+    _validate_frame_inputs(start_image_media_id, end_image_media_id, duration_s, aspect_ratio)
+    resolution = _validate_resolution(resolution)
+    mode = "start_end_frame_to_video" if end_image_media_id is not None else "frame_to_video"
+    client = get_flow_client()
+
+    try:
+        pid = client._batch_project_id(project_id)
+        if end_image_media_id is None:
+            freq = fb.omni_first_frame_request(
+                prompt, pid, start_image_media_id, duration_s=duration_s,
+                resolution=resolution, aspect=aspect_ratio,
+            )
+            rpcid = fb.RPC_GEN_VIDEO
+            batch_model = f"abra_i2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
+        else:
+            freq = fb.omni_first_last_request(
+                prompt, pid, start_image_media_id, end_image_media_id,
+                duration_s=duration_s, resolution=resolution, aspect=aspect_ratio,
+            )
+            rpcid = fb.RPC_GEN_VIDEO_FIRST_LAST
+            batch_model = f"omni_flash_i2v_{duration_s}s_first_last" + (
+                "_360p" if resolution == "360p" else ""
+            )
+        payload = await client._batch_payload(
+            rpcid, freq, fb.CAPTCHA_VIDEO, timeout=120,
+        )
+        operation = fb.read_operation(payload)
+        client._remember_operation(operation.operation_id, pid)
+    except Exception as exc:
+        return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+    return _batch_operation_result(operation, pid, batch_model, duration_s, resolution)
 
 async def generate_omni_flash_first_frame_video(
     start_image_media_id: str,
@@ -224,6 +271,7 @@ async def generate_omni_flash_first_frame_video(
     project_id: str,
     scene_id: str = "",
     duration_s: int = 8,
+    resolution: str = "720p",
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
@@ -236,6 +284,7 @@ async def generate_omni_flash_first_frame_video(
         project_id=project_id,
         scene_id=scene_id,
         duration_s=duration_s,
+        resolution=resolution,
         aspect_ratio=aspect_ratio,
         user_paygate_tier=user_paygate_tier,
         seed=seed,
@@ -249,6 +298,7 @@ async def generate_omni_flash_first_last_video(
     project_id: str,
     scene_id: str = "",
     duration_s: int = 8,
+    resolution: str = "720p",
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
@@ -261,6 +311,7 @@ async def generate_omni_flash_first_last_video(
         project_id=project_id,
         scene_id=scene_id,
         duration_s=duration_s,
+        resolution=resolution,
         aspect_ratio=aspect_ratio,
         user_paygate_tier=user_paygate_tier,
         seed=seed,
@@ -273,19 +324,35 @@ async def generate_omni_flash_video(
     project_id: str,
     scene_id: str = "",
     duration_s: int = 8,
+    resolution: str = "720p",
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
 ) -> dict:
-    """Submit an Omni Flash reference-to-video generation.
+    """Submit Omni Flash Ingredients/reference-to-video generation.
 
-    Successful responses are annotated with ``data.flowkitPolling`` containing
-    the workflow names and primary media IDs required by the Omni polling path.
-    Do not feed Omni operation handles to ``check_video_status``.
+    The migrated UI uses RPC ``MZZa6b`` with ``abra_r2v_<duration>s`` (720p)
+    or ``abra_r2v_<duration>s_360p``. Batch jobs use normal operation polling.
     """
-    _validate_reference_inputs(reference_media_ids, duration_s, aspect_ratio)
-    return {"error": _UNSUPPORTED_ON_BATCH}
+    refs = _validate_reference_inputs(reference_media_ids, duration_s, aspect_ratio)
+    resolution = _validate_resolution(resolution)
+    client = get_flow_client()
 
+    try:
+        pid = client._batch_project_id(project_id)
+        freq = fb.omni_reference_video_request(
+            prompt, pid, refs, duration_s=duration_s,
+            resolution=resolution, aspect=aspect_ratio,
+        )
+        payload = await client._batch_payload(
+            fb.RPC_GEN_VIDEO_REFERENCES, freq, fb.CAPTCHA_VIDEO, timeout=120,
+        )
+        operation = fb.read_operation(payload)
+        client._remember_operation(operation.operation_id, pid)
+    except Exception as exc:
+        return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+    batch_model = f"abra_r2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
+    return _batch_operation_result(operation, pid, batch_model, duration_s, resolution)
 
 async def _check_omni_batch_media(
     workflows: list[dict],
