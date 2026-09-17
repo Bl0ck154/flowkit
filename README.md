@@ -16,6 +16,23 @@
 
 ---
 
+> **Working against the new Google Flow API.** Flow moved to `flow.google.com`
+> in September 2026 and stopped minting the `Bearer ya29.…` that the old
+> `aisandbox-pa.googleapis.com` REST API needed. The `batchexecute` transport
+> that replaces it is in place and verified end to end against the live API —
+> image generation, 2K image export, and image-to-video all run green. Upgrading
+> from an older Flow Kit: reload the extension (v0.3.2+) and pin
+> `FLOW_PROJECT_ID`; Flow Kit can no longer create the project for you.
+>
+> Four capabilities are still unported because their payloads were never
+> captured off the new UI — **video upscale**, **reference-to-video (r2v)**,
+> **start+end-frame chaining**, and **Omni Flash frame/reference**. They fail
+> loudly with `UNSUPPORTED_ON_BATCH_API` instead of quietly producing the wrong
+> thing. `FLOW_ALLOW_DEGRADED=1` drops chaining and r2v to plain i2v; video
+> upscale has no fallback. To restore one properly see [`docs/CAPTURE.md`](docs/CAPTURE.md).
+
+---
+
 ### ☕ Sponsor this project
 
 <table align="center">
@@ -188,7 +205,7 @@ One signed-in Flow tab has to stay open; nothing here works headless.
 > **September 2026 — Flow moved.** It now lives at `flow.google.com` and the old
 > `aisandbox-pa.googleapis.com` REST API has no caller: the `Bearer ya29.…` it
 > needed stopped being minted. If you are upgrading from an older Flow Kit,
-> reload the extension (v0.3.0+) and pin `FLOW_PROJECT_ID` — see
+> reload the extension (v0.3.2+) and pin `FLOW_PROJECT_ID` — see
 > [Configuration](#configuration). The REST path has been removed; `git log`
 > has it if a payload is ever needed for reference.
 
