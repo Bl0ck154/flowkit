@@ -65,7 +65,7 @@ that change how you work:
 | `/fk-doctor` | Diagnose errors + prescribe fixes (Flow/extension/worker/YT) |
 | `/fk-add-material` | Set image material style |
 | `/fk-change-model` | Change video/image model |
-| `/fk-change-provider` | View & switch AI CLI provider used for video review (claude/agy/codex) |
+| `/fk-change-provider` | View & switch the AI CLI, model and effort per role (claude/agy/codex) |
 | `/fk-insert-scene` | Insert scenes into chain |
 | `/fk-upload-image` | Upload local image to get media_id |
 | `/fk-thumbnail` | Generate YouTube thumbnails |

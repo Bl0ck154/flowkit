@@ -11,6 +11,7 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
 - `cryptography` / architecture / import errors surface during setup
+- A `/fk-review-video` run fails or returns nothing, or an error mentions `No such filter`, `Frame extraction failed`, `auto-denied`, `out of credits`, `CLI failed`, `CLI timed out`, `invalid model selection`
 
 **DO NOT use when:**
 - The request is still `PENDING` and hasn't been attempted yet
@@ -203,6 +204,25 @@ When the user describes a symptom in plain language, map it here first.
 | YouTube upload `invalidTags` | Tag-char overflow — quote overhead counts (spaces → +2 per tag) |
 | Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
 | `curl: (7) Failed to connect to 127.0.0.1:8100` | Agent not running — `python -m agent.main` |
+
+### G. Video review errors (`services/video_reviewer.py`)
+
+Review runs outside the worker — no retry policy applies, the call just raises.
+Providers, models and efforts come from `agent/providers.json`; see
+`/fk-change-provider`.
+
+| Error | Cause | Fix |
+|---|---|---|
+| `Frame extraction failed: ... No such filter: 'drawtext'` | ffmpeg built without libfreetype. Should no longer happen — the filter is probed and skipped — so seeing it means the probe was bypassed | `ffmpeg -filters \| grep drawtext`. Absent is fine; sheets just lose their burned-in timestamps |
+| `agy CLI had tools auto-denied headlessly (RunCommand) — its N-character answer cannot be trusted to have come from the images` | agy tried to shell out to read the contact sheet instead of using its file-reading tool; headless mode cannot prompt, so the tool was denied. Raised whether or not agy still produced an answer — the prompt carries the rubric, both scene prompts and the character names, which is enough to write a plausible review without ever looking at a frame | Restore the steering in `_AGY_READ_STEER`. **Do not** add `--dangerously-skip-permissions` — it auto-approves every tool including arbitrary shell commands, for a job that only reads JPEGs |
+| `agy CLI returned non-JSON output: ...` | agy answered with bare prose on a zero exit code — usually a permission or startup error | Read the quoted text; it names the real problem |
+| `agy CLI failed (rc=1): invalid model selection ... conflicts with --effort=` | agy's slugs name their own effort (`gemini-3.8-flash-low`), so model and effort cannot both be set | Clear one of them. The API rejects the pair with a 400; this only reaches the CLI from a hand-edited `providers.json` |
+| `codex CLI failed (rc=1): ... Your workspace is out of credits` | The OpenAI workspace has no balance. `installed: true` only means the binary is on PATH | Refill, or switch the role to `claude`/`agy` |
+| `codex CLI exited cleanly but wrote no answer to its output file` | codex returned success but produced nothing | Re-run; if it repeats, switch provider |
+| `<provider> CLI timed out after Ns` | The review exceeded `REVIEW_CLI_TIMEOUT_S` (default 120) | Raise the env var, or lower `REVIEW_FPS_*` / `REVIEW_MAX_FRAMES` so there is less to look at |
+| `review answer had an error entry with no usable severity (expected one of ['CRITICAL', 'HIGH', 'MINOR']): ...` | The model graded an error with something outside the three severities. `has_critical_errors`, the `character_consistency` cap and the fix guide all branch on that exact string, so anything else silently disables all three — the model flagged a defect and the score would not show it | Read the quoted entry. A model that keeps doing this is not following the rubric; switch the role to another one |
+| `Scene <id>: review answer needed repair — N error field(s) defaulted, M usable segment(s) unreadable` (warning, not a failure) | A near-miss field name (`timeRange` for `time_range`) or a missing description. Repaired, because losing those costs context but cannot move a score | Nothing required. A rising count means the model is drifting from the rubric |
+| `CLI answer had no dimensions: ...` | The CLI returned parseable JSON with no scores in it. Every dimension defaults to 5.0, so this would otherwise have become a complete, plausible "poor" review of a video nobody actually looked at | Read the quoted answer. Usually the model wrote prose around the JSON, or ran out of context — lower `REVIEW_MAX_FRAMES` or try another model |
 
 ## Worker retry policy (`processor.py:_handle_failure`)
 

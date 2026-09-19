@@ -147,3 +147,50 @@ export interface SceneReview {
   fps_used: number
   has_critical_errors: boolean
 }
+
+// AI provider settings — match the /api/providers payload exactly
+export interface RoleAssignment {
+  provider: string
+  model: string | null
+  effort: string | null
+}
+
+export interface RoleMeta {
+  label: string
+  description: string
+}
+
+export interface ProviderInfo {
+  binary: string
+  installed: boolean
+  tested: boolean | null
+  error: string | null
+  efforts: string[]
+  default_model: string | null
+  catalog_is_authoritative: boolean
+  model_encodes_effort: boolean
+}
+
+export interface ProvidersResponse {
+  active: string
+  roles: Record<string, RoleAssignment>
+  role_meta: Record<string, RoleMeta>
+  providers: Record<string, ProviderInfo>
+}
+
+export interface ProviderModel {
+  id: string
+  label: string
+}
+
+export interface ProviderModelsResponse {
+  provider: string
+  models: ProviderModel[]
+  authoritative: boolean
+}
+
+export interface ProvidersUpdateResponse {
+  status: string
+  active: string
+  roles: Record<string, RoleAssignment>
+}

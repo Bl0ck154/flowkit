@@ -1,6 +1,6 @@
 """Pydantic models for video review results."""
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 
 
 class SegmentScore(BaseModel):
@@ -9,7 +9,12 @@ class SegmentScore(BaseModel):
 
 
 class VideoError(BaseModel):
-    severity: str  # CRITICAL / HIGH / MINOR
+    # Closed on purpose. `has_critical_errors`, the character_consistency cap
+    # and `_fix_guide` all branch on this exact string, so a severity outside
+    # the set is not a cosmetic oddity — it silently disables all three.
+    # Reviews are computed and returned, never read back from storage, so
+    # narrowing the type cannot break a load of old data.
+    severity: Literal["CRITICAL", "HIGH", "MINOR"]
     time_range: str
     description: str
 

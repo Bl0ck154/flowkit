@@ -137,3 +137,173 @@ class TestCreateContactSheetsChunking:
             )
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# review_scene_video :: what a malformed CLI answer is allowed to become
+# ---------------------------------------------------------------------------
+
+class TestReviewScoringRefusesAFabricatedScore:
+    """Every field of DimensionScores has a 5.0 default, so an answer carrying
+    no `dimensions` used to become a complete, plausible review — 5.0 across
+    the board, verdict "poor", zero errors — indistinguishable from a real
+    verdict on a mediocre video. That is the same class of bug as a CLI
+    returning an empty response on a zero exit code, and it has to fail loudly
+    instead.
+    """
+
+    @staticmethod
+    def _patched(monkeypatch, analysis):
+        import agent.services.video_reviewer as vr
+
+        async def fake_download(url, dest):
+            Path(dest).write_bytes(b"not really a video")
+
+        def fake_sheets(video_path, fps, out_dir):
+            sheet = Path(out_dir) / "sheet_00.jpg"
+            sheet.write_bytes(b"jpeg")
+            return [sheet], 9
+
+        async def fake_analyze(sheets, n_frames, fps, scene, timestamped=None):
+            return analysis
+
+        monkeypatch.setattr(vr, "ANTHROPIC_API_KEY", "")
+        monkeypatch.setattr(vr, "_download_video", fake_download)
+        monkeypatch.setattr(vr, "_create_contact_sheets", fake_sheets)
+        monkeypatch.setattr(vr, "_analyze_cli", fake_analyze)
+        return vr
+
+    SCENE = {"id": "s1", "vertical_video_url": "https://example.test/v.mp4",
+             "prompt": "p", "video_prompt": "vp", "character_names": "[]"}
+
+    @pytest.mark.asyncio
+    async def test_an_answer_with_no_dimensions_raises(self, monkeypatch):
+        vr = self._patched(monkeypatch, {"errors": [], "usable_segments": []})
+        with pytest.raises(RuntimeError, match="no dimensions"):
+            await vr.review_scene_video(dict(self.SCENE), [])
+
+    @pytest.mark.asyncio
+    async def test_an_empty_dimensions_object_raises(self, monkeypatch):
+        vr = self._patched(monkeypatch, {"dimensions": {}, "errors": []})
+        with pytest.raises(RuntimeError, match="no dimensions"):
+            await vr.review_scene_video(dict(self.SCENE), [])
+
+    @pytest.mark.asyncio
+    async def test_a_partial_dimensions_object_still_defaults(self, monkeypatch):
+        """A model that scored some axes and not others is answering, just
+        incompletely — that is worth keeping, unlike one that answered nothing.
+        """
+        vr = self._patched(monkeypatch, {
+            "dimensions": {"character_consistency": 9.0}, "errors": [], "usable_segments": []})
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+        assert review.dimensions.character_consistency == 9.0
+        assert review.dimensions.motion_quality == 5.0  # the documented default
+
+    GOOD_DIMS = {"character_consistency": 9.0, "prompt_adherence": 9.0,
+                 "motion_quality": 9.0, "visual_fidelity": 9.0,
+                 "temporal_coherence": 9.0, "composition": 9.0}
+
+    @pytest.mark.asyncio
+    async def test_a_near_miss_key_keeps_the_critical_instead_of_dropping_it(self, monkeypatch):
+        """`timeRange` for `time_range` used to drop the whole entry, and what
+        drops with it is usually CRITICAL — the one severity that caps
+        character_consistency at 3.0 and forces the verdict below acceptable.
+        An unusable video came back clean over a camelCase key.
+
+        The entry is repaired rather than refused: the model found the defect
+        and said so, it just spelled one field name oddly. Failing the scene
+        here would throw away a correct finding.
+        """
+        vr = self._patched(monkeypatch, {
+            "dimensions": dict(self.GOOD_DIMS),
+            "errors": [{"severity": "CRITICAL", "timeRange": "3s-5s",
+                        "description": "the dog becomes a cat"}],
+            "usable_segments": [],
+        })
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+
+        assert [e.severity for e in review.errors] == ["CRITICAL"]
+        assert review.errors[0].time_range == "3s-5s"
+        assert review.has_critical_errors is True
+        assert review.dimensions.character_consistency == 3.0
+        assert review.overall_score <= 5.9
+
+    @pytest.mark.asyncio
+    async def test_a_missing_time_range_is_repaired_not_refused(self, monkeypatch):
+        """Losing a timestamp costs the reader context; it cannot move a score.
+        Same placeholder the legacy plain-string path has always used."""
+        vr = self._patched(monkeypatch, {
+            "dimensions": dict(self.GOOD_DIMS),
+            "errors": [{"severity": "MINOR", "description": "candle count drifts"}],
+            "usable_segments": [],
+        })
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+        assert review.errors[0].time_range == "?"
+        assert review.errors[0].description == "candle count drifts"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("severity", [None, "", "SEVERE", "MAJOR", "Critical character drift"])
+    async def test_an_unrecognisable_severity_fails_the_scene(self, monkeypatch, severity):
+        """The asymmetry that makes the rest safe. `has_critical_errors`, the
+        character_consistency cap and `_fix_guide` all branch on this exact
+        string, so a severity outside {CRITICAL, HIGH, MINOR} silently disables
+        all three — the model flagged something and the score does not show it.
+        Unlike a missing timestamp, there is no safe default: we do not know
+        whether the video passed."""
+        entry = {"time_range": "3s-5s", "description": "character morphs"}
+        if severity is not None:
+            entry["severity"] = severity
+        vr = self._patched(monkeypatch, {
+            "dimensions": dict(self.GOOD_DIMS), "errors": [entry], "usable_segments": []})
+        with pytest.raises(RuntimeError, match="no usable severity"):
+            await vr.review_scene_video(dict(self.SCENE), [])
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_segment_is_dropped_not_raised(self, monkeypatch):
+        """A lost segment errs toward "less usable footage", which cannot turn
+        a bad video into a good score the way a lost CRITICAL can — so it is a
+        drop, not a failure. It is still logged."""
+        vr = self._patched(monkeypatch, {
+            "dimensions": dict(self.GOOD_DIMS),
+            "errors": [],
+            "usable_segments": [
+                {"time_range": "0s-4s", "score": 8.0},
+                {"time_range": "4s-8s"},          # no score — unreadable
+                {"timeRange": "0s-2s", "score": 7.0},  # near-miss key — repaired
+                "not even a dict",
+            ],
+        })
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+        assert [(s.time_range, s.score) for s in review.usable_segments] == [
+            ("0s-4s", 8.0), ("0s-2s", 7.0)]
+
+    @pytest.mark.asyncio
+    async def test_a_well_formed_critical_still_caps_the_score(self, monkeypatch):
+        """The other half of the same property: a CRITICAL that IS readable
+        must go on capping the score, so the strictness above is not covering
+        for a parser that stopped working."""
+        vr = self._patched(monkeypatch, {
+            "dimensions": {"character_consistency": 9.0, "prompt_adherence": 9.0,
+                           "motion_quality": 9.0, "visual_fidelity": 9.0,
+                           "temporal_coherence": 9.0, "composition": 9.0},
+            "errors": [{"severity": "critical", "time_range": "3s-5s",
+                        "description": "the dog becomes a cat"}],
+            "usable_segments": [],
+        })
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+        assert review.has_critical_errors is True
+        assert review.dimensions.character_consistency == 3.0
+        assert review.overall_score <= 5.9
+        assert review.verdict in ("poor", "unusable")
+
+    @pytest.mark.asyncio
+    async def test_a_plain_string_error_is_still_accepted(self, monkeypatch):
+        """The documented legacy shape. Strictness must not break it."""
+        vr = self._patched(monkeypatch, {
+            "dimensions": {"character_consistency": 8.0},
+            "errors": ["camera drifts after 4s"],
+            "usable_segments": [],
+        })
+        review = await vr.review_scene_video(dict(self.SCENE), [])
+        assert [e.description for e in review.errors] == ["camera drifts after 4s"]
+        assert review.errors[0].severity == "HIGH"
