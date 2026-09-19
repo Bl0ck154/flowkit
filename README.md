@@ -499,7 +499,7 @@ Ready-to-use workflow recipes in `skills/` (also available as `/slash-commands` 
 |-------|-------------|
 | `/fk-review-video` | AI vision scoring of generated scene videos (quality, consistency, usability) — see [AI Vision Providers](#ai-vision-providers-video-review) below |
 | `/fk-review-board` | Visual scene-by-scene review board for feedback before locking a cut |
-| `/fk-change-provider` | View/switch which AI CLI (claude/agy/codex) powers `/fk-review-video` |
+| `/fk-change-provider` | View/switch the AI CLI, model and effort behind `/fk-review-video` |
 
 ### Reference
 
@@ -556,22 +556,62 @@ Skills are `.md` recipes any AI coding-assistant CLI can read and follow — thi
 
 Separate from the table above — this is about **which CLI backend does the vision analysis** for `/fk-review-video`. Three providers are supported and swappable at runtime, no restart required:
 
-| Provider | Binary | Setup |
-|----------|--------|-------|
-| `claude` | Claude Code CLI | Default — works out of the box |
-| `agy` | Google Antigravity CLI | Install separately, sign in once |
-| `codex` | OpenAI Codex CLI | `npm install -g @openai/codex`, then `codex login` once |
+| Provider | Binary | Reasoning efforts | Model catalog | Setup |
+|----------|--------|-------------------|---------------|-------|
+| `claude` | Claude Code CLI | `low` `medium` `high` `xhigh` `max` | aliases (`sonnet`, `opus`, `haiku`, `fable`) or any full model name | Default — works out of the box |
+| `agy` | Google Antigravity CLI | `low` `medium` `high` | closed — `agy models` is the whole list and agy rejects anything else | Install separately, sign in once |
+| `codex` | OpenAI Codex CLI | `low` `medium` `high` `xhigh` `max` (varies per model) | codex's own on-disk cache, plus slugs newer than it | `npm install -g @openai/codex`, then `codex login` once |
+
+Provider, model and effort are set **per role** — a role being a job an AI CLI
+does for Flow Kit. There is one today, `video_review`; the config is a map so
+the next one is an entry rather than a schema change. Model and effort may both
+be `null`, meaning "whatever that CLI defaults to".
+
+**For `agy`, model and effort are mutually exclusive.** Its slugs name their own
+effort — `gemini-3.8-flash-low`, `gemini-3.1-pro-high` — so setting both is
+rejected (`--model gpt-oss-120b-medium conflicts with --effort=low`), and a slug
+with no effort in its name refuses `--effort` outright
+(`--effort is not supported for model "claude-sonnet-4-6"`). Pick a model, or
+pick an effort and let agy choose the model. The API answers 400 for the pair.
 
 ```bash
-# View provider status (installed / version-tested / currently active)
+# View provider status + the current per-role config
+#   live=true additionally runs `<binary> --version` on each (a few seconds)
 curl -s "http://127.0.0.1:8100/api/providers?live=true" | python3 -m json.tool
 
-# Switch provider — hot-reloaded immediately, no server restart
+# List a provider's models (refresh=true bypasses the 5-minute cache)
+curl -s "http://127.0.0.1:8100/api/providers/models?provider=agy" | python3 -m json.tool
+
+# Point a role at a provider/model/effort — hot-reloaded, no server restart
+curl -X PATCH http://127.0.0.1:8100/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"roles": {"video_review": {"provider": "claude", "model": "sonnet", "effort": "high"}}}'
+
+# agy takes a model OR an effort, never both — its slugs name their own effort
+curl -X PATCH http://127.0.0.1:8100/api/providers \
+  -H "Content-Type: application/json" \
+  -d '{"roles": {"video_review": {"provider": "agy", "model": "gemini-3.8-flash-low"}}}'
+
+# The older whole-agent switch still works. It also clears each role's model
+# (a slug means nothing to a different CLI) and drops an effort the new
+# provider does not have.
 curl -X PATCH http://127.0.0.1:8100/api/providers \
   -H "Content-Type: application/json" -d '{"active": "agy"}'
 ```
 
-Or just run `/fk-change-provider` for an interactive picker. Full details in `skills/fk-change-provider.md`.
+Or edit it in the dashboard under **Settings**, or run `/fk-change-provider` for
+an interactive picker. Full details in `skills/fk-change-provider.md`.
+
+**`codex` needs credits on its OpenAI workspace.** `installed: true` only means
+the binary is on PATH; a workspace with no balance fails every review with
+`ERROR: Your workspace is out of credits`.
+
+**Contact sheets lose their timestamps on an ffmpeg without `libfreetype`.**
+Homebrew's ffmpeg 8.x is one such build: `drawtext` is simply absent, and
+naming a filter that does not exist aborts the whole chain. Flow Kit probes for
+it once and falls back to untimestamped frames, telling the model the frame
+interval instead so it can still answer in time ranges. `ffmpeg -filters | grep
+drawtext` shows whether yours has it.
 
 ## Video Generation Techniques
 
@@ -668,7 +708,7 @@ agent/
 ├── main.py              # FastAPI app + WebSocket server
 ├── config.py            # Configuration (loads models.json, providers.json)
 ├── models.json          # Video/upscale/image model mappings
-├── providers.json        # Active AI CLI provider for video review (claude/agy/codex)
+├── providers.json        # Per-role AI CLI provider/model/effort (claude/agy/codex)
 ├── db/
 │   ├── schema.py        # SQLite schema (aiosqlite)
 │   └── crud.py          # Async CRUD with column whitelisting
@@ -679,6 +719,7 @@ agent/
 │   ├── flow_client.py   # WS bridge to extension
 │   ├── tts.py           # OmniVoice TTS (subprocess-based)
 │   ├── scene_chain.py   # Continuation scene logic
+│   ├── cli_providers.py  # What each AI CLI accepts; role → provider/model/effort
 │   ├── video_reviewer.py # AI vision review — contact sheet + claude/agy/codex CLI dispatch
 │   └── post_process.py  # ffmpeg trim/merge/music
 └── worker/
@@ -860,6 +901,22 @@ From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
 ## Changelog
 
 Dates are merge dates. Older releases are tagged; `git log` is the full record.
+
+### v1.3.0 — 2026-09-20 — video review works again
+
+Video review had been failing on every path at once, which is why nothing about
+it looked fixable from the symptoms.
+
+| Date | Change |
+|---|---|
+| 2026-09-20 | **ffmpeg without `drawtext`**: Homebrew's ffmpeg 8.x is built without `libfreetype`, so the timestamp filter does not exist and naming it aborted the whole chain — frame extraction died before any provider was reached. Probed once, with a fallback to untimestamped frames and a prompt that hands the model the frame interval instead |
+| 2026-09-20 | **`agy` was auto-denied**: handed a bare file path, agy reaches for a shell command to look at the file, headless mode cannot prompt for that permission, and the run returns an empty response on a **zero** exit code. Fixed by steering it at its own file-reading tool and naming the sheet directory with `--add-dir`, which gets the read done unprivileged — so `--dangerously-skip-permissions`, which auto-approves every tool including arbitrary shell commands, is gone. Output is parsed from `--output-format json`, and a denied tool is an error whether or not agy still answered — the prompt carries the rubric and both scene prompts, so a denied run can write a plausible review from the text alone |
+| 2026-09-20 | **`codex` no longer bypasses its sandbox**: `-i` hands codex the image bytes directly, so the run needs neither a shell nor a writable filesystem. `--dangerously-bypass-approvals-and-sandbox` bought nothing and cost the sandbox; `--sandbox read-only` already implies `approval: never`. An empty output file is now an error instead of a JSON decode failure three frames away |
+| 2026-09-20 | **A malformed error entry no longer vanishes.** The parser required the exact keys `severity`/`time_range`/`description` and silently dropped anything else — and what it dropped was usually CRITICAL, the one severity that caps `character_consistency` at 3.0 and forces the verdict below acceptable, so `timeRange` instead of `time_range` turned an unusable video into a clean pass. The three fields are now handled by what they can cost: near-miss names are normalised, a missing time range or description is repaired and logged, and only a severity outside `{CRITICAL, HIGH, MINOR}` fails the scene — that is the one field with no safe default, because without it we do not know whether the video passed. `VideoError.severity` is a `Literal` now, so the three code paths that branch on it cannot be handed anything else |
+| 2026-09-20 | **A review with no scores in it is now a failure, not a score.** Every dimension defaults to 5.0, so a CLI answer carrying no `dimensions` became a complete, plausible review — 5.0 across the board, verdict "poor", zero errors — of a video nothing had actually looked at |
+| 2026-09-20 | **stdin closed for all three CLIs.** Each appends piped stdin to the prompt when stdin is not a terminal — codex documents it as a `<stdin>` block. Under uvicorn that is whatever the launching shell handed down |
+| 2026-09-20 | **Per-role provider, model and effort**, editable in the dashboard under Settings or via `PATCH /api/providers`. Efforts are validated against each CLI's real ladder (agy stops at `high`); models are validated only for agy, whose catalog is closed, so a slug newer than claude's or codex's cache still goes through. A whole-agent `{"active": …}` switch clears each role's model and clamps its effort, because neither survives a change of CLI |
+| 2026-09-20 | **agy's model and effort are mutually exclusive** and the config now says so. Its slugs name their own effort (`gemini-3.8-flash-low`), so the pair is rejected — a mismatch conflicts, and a slug with no effort in its name refuses `--effort` at all |
 
 ### v1.2.0 — 2026-09-18 — the Flow migration
 

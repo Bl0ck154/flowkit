@@ -6,9 +6,11 @@ Two analysis backends:
 """
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -31,6 +33,10 @@ from agent.config import (
 )
 from agent.db.crud import list_scenes, get_project_characters
 from agent.models.review import DimensionScores, SceneReview, SegmentScore, VideoError, VideoReview
+from agent.services.cli_providers import (  # noqa: F401  (PROVIDER_BINARIES re-exported)
+    PROVIDER_BINARIES,
+    resolve_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +195,49 @@ def _frame_to_base64(path: Path) -> str:
     return base64.standard_b64encode(path.read_bytes()).decode()
 
 
+@functools.lru_cache(maxsize=1)
+def _has_drawtext() -> bool:
+    """Whether this ffmpeg build carries the `drawtext` filter.
+
+    Homebrew's ffmpeg 8.x is built without libfreetype, so `drawtext` is simply
+    absent and any filter chain naming it aborts with "No such filter:
+    'drawtext'". That took down the whole review path, not just the timestamps
+    it was there to draw. Probe once and degrade to untimestamped frames.
+    """
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("Could not list ffmpeg filters (%s) — assuming no drawtext", e)
+        return False
+    present = re.search(r"^\s*\S+\s+drawtext\s", out.stdout, re.MULTILINE) is not None
+    if not present:
+        logger.warning(
+            "ffmpeg has no drawtext filter (no libfreetype) — contact sheets will "
+            "carry no burned-in timestamps; the vision prompt compensates by "
+            "describing frame order and interval instead"
+        )
+    return present
+
+
+def _frame_filter(fps: float) -> str:
+    """Filter chain for contact-sheet frames, timestamped where ffmpeg allows."""
+    chain = f"fps={fps},scale=320:-1"
+    if _has_drawtext():
+        chain += (
+            ",drawtext=text='%{pts\\:hms}':x=5:y=5:fontsize=14:"
+            "fontcolor=white:borderw=1:bordercolor=black"
+        )
+    return chain
+
+
 def _create_contact_sheets(video_path: str, fps: float, out_dir: str) -> tuple[list[Path], int]:
-    """Extract all frames (timestamped) and tile them into REVIEW_SHEET_COLSxREVIEW_SHEET_ROWS sheets.
+    """Extract all frames and tile them into REVIEW_SHEET_COLSxREVIEW_SHEET_ROWS sheets.
+
+    Frames carry burned-in timestamps only where ffmpeg has `drawtext` — see
+    `_frame_filter`. `_analyze_cli` words the prompt to match either way.
 
     Returns (sheet_paths in chronological order, total_frames after any REVIEW_MAX_FRAMES cap).
     """
@@ -198,12 +245,7 @@ def _create_contact_sheets(video_path: str, fps: float, out_dir: str) -> tuple[l
     frames_dir.mkdir(exist_ok=True)
     extract_cmd = [
         "ffmpeg", "-y", "-i", video_path,
-        "-vf", (
-            f"fps={fps},"
-            f"scale=320:-1,"
-            f"drawtext=text='%{{pts\\:hms}}':x=5:y=5:fontsize=14:"
-            f"fontcolor=white:borderw=1:bordercolor=black"
-        ),
+        "-vf", _frame_filter(fps),
         "-q:v", "2",
         f"{frames_dir}/frame_%04d.jpg",
     ]
@@ -330,6 +372,31 @@ def _build_prompt(n_frames: int, fps: float, n_sheets: int, scene: dict) -> str:
     )
 
 
+# Model answers stray on field *names* far more often than on values. These are
+# the near-misses worth absorbing; anything outside the map is left alone and
+# judged on its merits below. Keys are compared with underscores stripped and
+# lowercased, so `timeRange` and `time_range` land on the same entry.
+_ERROR_KEY_ALIASES = {
+    "timerange": "time_range",
+    "time": "time_range",
+    "desc": "description",
+    "level": "severity",
+}
+_SEGMENT_KEY_ALIASES = {
+    "timerange": "time_range",
+    "time": "time_range",
+}
+_SEVERITIES = ("CRITICAL", "HIGH", "MINOR")
+
+
+def _normalise_keys(entry: dict, aliases: dict) -> dict:
+    """Rename near-miss keys onto the names the rubric asked for."""
+    return {
+        aliases.get(str(k).replace("_", "").lower(), k): v
+        for k, v in entry.items()
+    }
+
+
 def _parse_json_response(raw: str) -> dict:
     """Extract JSON from a response that may contain markdown fences."""
     raw = raw.strip()
@@ -348,11 +415,8 @@ def _parse_json_response(raw: str) -> dict:
 
 # ─── Backend 1: CLI providers (default, no API key needed) ───
 
-PROVIDER_BINARIES = {
-    "claude": "claude",
-    "agy": "agy",
-    "codex": "codex",
-}
+# PROVIDER_BINARIES and resolve_role are imported from agent.services.cli_providers,
+# which is where everything the three CLIs disagree about now lives.
 
 
 async def _communicate_with_timeout(proc, provider: str) -> tuple:
@@ -365,8 +429,16 @@ async def _communicate_with_timeout(proc, provider: str) -> tuple:
 
 
 async def _spawn_and_check(args: tuple, provider: str) -> bytes:
+    # stdin is closed deliberately. All three CLIs read piped stdin when it is
+    # not a terminal and append it to the prompt — codex says so in its own
+    # --help ("stdin is appended as a `<stdin>` block"). Under uvicorn stdin is
+    # whatever the launching shell handed down, which is nothing we want in a
+    # vision prompt.
     proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        *args,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await _communicate_with_timeout(proc, provider)
     if proc.returncode != 0:
@@ -374,38 +446,153 @@ async def _spawn_and_check(args: tuple, provider: str) -> bytes:
     return stdout
 
 
-async def _run_claude_cli(prompt: str) -> str:
-    stdout = await _spawn_and_check(
-        ("claude", "-p", prompt, "--allowedTools", "Read", "--output-format", "text"), "claude"
-    )
+def _model_effort_args(model: str | None, effort: str | None) -> list:
+    """claude and agy happen to spell these the same way; codex does not."""
+    args = []
+    if model:
+        args += ["--model", model]
+    if effort:
+        args += ["--effort", effort]
+    return args
+
+
+async def _run_claude_cli(
+    prompt: str,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    add_dirs: tuple = (),
+) -> str:
+    args = ["claude", "-p", prompt, "--allowedTools", "Read", "--output-format", "text"]
+    for d in add_dirs:
+        args += ["--add-dir", str(d)]
+    args += _model_effort_args(model, effort)
+    stdout = await _spawn_and_check(tuple(args), "claude")
     return stdout.decode()
 
 
-async def _run_agy_cli(prompt: str) -> str:
-    stdout = await _spawn_and_check(
-        ("agy", "-p", prompt, "--dangerously-skip-permissions", "--output-format", "text"), "agy"
-    )
-    return stdout.decode()
+# agy is agentic: handed a bare file path it reaches for a shell command to look
+# at the file, headless mode cannot prompt for that permission, so the tool is
+# auto-denied and the run returns an empty response on a *zero* exit code.
+# Pointing it at its own file-reading tool is what makes the read happen
+# unprivileged — verified against agy 1.2.7. The remedy agy itself suggests in
+# that error, --dangerously-skip-permissions, auto-approves every tool including
+# arbitrary shell commands, for a job whose whole need is reading three JPEGs.
+_AGY_READ_STEER = (
+    "Use your file-reading tool to read the image file(s). "
+    "Do NOT run any shell command."
+)
 
 
-async def _run_codex_cli(prompt: str, contact_sheets: list[Path]) -> str:
+def _parse_agy_envelope(raw: str) -> str:
+    """Pull the answer out of `agy --output-format json`, or explain the silence."""
+    raw = raw.strip()
+    if not raw:
+        raise RuntimeError("agy CLI returned no output")
+    try:
+        env = json.loads(raw)
+    except json.JSONDecodeError:
+        # Permission refusals and startup errors arrive as bare prose on a zero
+        # exit code, so _spawn_and_check never sees them. They land here.
+        raise RuntimeError(f"agy CLI returned non-JSON output: {raw[:300]}")
+    if not isinstance(env, dict):
+        raise RuntimeError(f"agy CLI returned unexpected JSON: {raw[:300]}")
+
+    response = (env.get("response") or "").strip()
+    denied = env.get("denied_actions") or []
+    if denied:
+        # Any denial at all, answer or no answer. The prompt tells agy to read
+        # the sheets with its file-reading tool and run no shell command, so a
+        # denial means the steering did not hold — and the prompt also carries
+        # the full scoring rubric, the scene's image prompt, its video prompt
+        # and the character names. That is more than enough for a plausible
+        # review written entirely from the text, without the images ever being
+        # looked at. A denial plus a confident answer is the more dangerous of
+        # the two cases, not the safer one.
+        #
+        # status stays "SUCCESS" here, which is why this is caught by name
+        # rather than by the status field.
+        names = ", ".join(
+            str(d.get("display_name") or d.get("action"))
+            for d in denied if isinstance(d, dict)
+        )
+        raise RuntimeError(
+            f"agy CLI had tools auto-denied headlessly ({names or denied}) — "
+            f"its {len(response)}-character answer cannot be trusted to have "
+            f"come from the images"
+        )
+    status = env.get("status")
+    if status is not None and status != "SUCCESS":
+        raise RuntimeError(f"agy CLI reported status={status!r}: {raw[:300]}")
+    if not response:
+        raise RuntimeError("agy CLI returned an empty response")
+    return response
+
+
+async def _run_agy_cli(
+    prompt: str,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+    add_dirs: tuple = (),
+) -> str:
+    # --print-timeout is set just inside our own wait_for so agy gets to finish
+    # and report on its own terms rather than being SIGKILLed with its answer
+    # still buffered. Left unset it defaults to 0, meaning "wait forever".
+    print_timeout = max(10, int(REVIEW_CLI_TIMEOUT_S) - 5)
+    args = [
+        "agy", "-p", prompt,
+        "--output-format", "json",
+        "--print-timeout", f"{print_timeout}s",
+    ]
+    for d in add_dirs:
+        args += ["--add-dir", str(d)]
+    if model and effort:
+        # agy's slugs carry the effort (gemini-3.8-flash-low), so the pair is
+        # rejected unless it is redundant. The API refuses to store both; this
+        # covers a hand-edited providers.json, which is supported.
+        logger.warning(
+            "Dropping effort %r — agy model %r already names its effort", effort, model
+        )
+        effort = None
+    args += _model_effort_args(model, effort)
+    stdout = await _spawn_and_check(tuple(args), "agy")
+    return _parse_agy_envelope(stdout.decode())
+
+
+async def _run_codex_cli(
+    prompt: str,
+    contact_sheets: list,
+    *,
+    model: str | None = None,
+    effort: str | None = None,
+) -> str:
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp:
         out_path = Path(tmp.name)
     try:
-        image_args = []
+        # read-only, not --dangerously-bypass-approvals-and-sandbox: -i hands
+        # codex the image bytes directly, so the run needs no filesystem write
+        # and no shell at all. read-only still implies approval:never, so it
+        # cannot hang waiting for a prompt. --skip-git-repo-check keeps the run
+        # working if the server is ever started outside a git checkout.
+        args = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only"]
         for sheet in contact_sheets:
-            image_args.extend(["-i", str(sheet)])
-        await _spawn_and_check(
-            (
-                "codex", "exec",
-                *image_args,
-                "-o", str(out_path),
-                "--dangerously-bypass-approvals-and-sandbox",
-                prompt,
-            ),
-            "codex",
-        )
-        return out_path.read_text()
+            args += ["-i", str(sheet)]
+        args += ["-o", str(out_path)]
+        if model:
+            args += ["-m", model]
+        if effort:
+            # codex has no --effort; reasoning level is a config override, and
+            # -c parses its value as TOML, hence the quotes around the string.
+            args += ["-c", f'model_reasoning_effort="{effort}"']
+        args.append(prompt)
+        await _spawn_and_check(tuple(args), "codex")
+        answer = out_path.read_text().strip()
+        if not answer:
+            raise RuntimeError(
+                "codex CLI exited cleanly but wrote no answer to its output file"
+            )
+        return answer
     finally:
         out_path.unlink(missing_ok=True)
 
@@ -415,31 +602,61 @@ async def _analyze_cli(
     n_frames: int,
     fps: float,
     scene: dict,
+    timestamped: bool | None = None,
 ) -> dict:
-    """Analyze contact sheets via the active CLI provider (claude/agy/codex)."""
+    """Analyze contact sheets via the CLI provider configured for video_review."""
+    if timestamped is None:
+        timestamped = _has_drawtext()
     n_sheets = len(contact_sheets)
     base_prompt = _build_prompt(n_frames, fps, n_sheets, scene)
-    provider = config.CLI_PROVIDERS["active"]
-    logger.info("Calling %s CLI for vision analysis (%d frames, %d sheets)", provider, n_frames, n_sheets)
+
+    role = resolve_role("video_review")
+    provider = role["provider"]
+    logger.info(
+        "Calling %s CLI for vision analysis (%d frames, %d sheets, model=%s, effort=%s, timestamps=%s)",
+        provider, n_frames, n_sheets,
+        role["model"] or "default", role["effort"] or "default", timestamped,
+    )
+
+    if timestamped:
+        stamp_note = "with timestamps"
+    else:
+        # Without burned-in timestamps the model still has to answer in
+        # time_range, so hand it the arithmetic instead of the labels.
+        stamp_note = (
+            f"without timestamps — frames run left to right then top to bottom, "
+            f"one every {1 / fps:.2f}s, so frame N starts at (N-1)*{1 / fps:.2f}s"
+        )
+
     if n_sheets == 1:
-        sheet_intro = f"It is a contact sheet of {n_frames} video frames at {fps}fps with timestamps."
+        sheet_intro = f"It is a contact sheet of {n_frames} video frames at {fps}fps {stamp_note}."
     else:
         sheet_intro = (
             f"These are {n_sheets} sequential contact sheets covering {n_frames} video frames "
-            f"at {fps}fps with timestamps, in chronological order (sheet 1 is earliest)."
+            f"at {fps}fps {stamp_note}, in chronological order (sheet 1 is earliest)."
         )
+
     if provider == "codex":
         full_prompt = f"{sheet_intro}\n\n{base_prompt}"
-        raw = await _run_codex_cli(full_prompt, contact_sheets)
+        raw = await _run_codex_cli(
+            full_prompt, contact_sheets, model=role["model"], effort=role["effort"]
+        )
     else:
         if n_sheets == 1:
             read_instruction = f"Read the image at {contact_sheets[0]}."
         else:
             sheet_list = ", ".join(str(s) for s in contact_sheets)
             read_instruction = f"Read the images at: {sheet_list}, in that order."
+        if provider == "agy":
+            read_instruction = f"{read_instruction} {_AGY_READ_STEER}"
         full_prompt = f"{read_instruction} {sheet_intro}\n\n{base_prompt}"
+        # The sheets live in a TemporaryDirectory outside the server's cwd;
+        # naming it keeps the read inside a workspace the CLI was told about.
+        add_dirs = tuple(sorted({str(Path(s).parent) for s in contact_sheets}))
         runner = {"claude": _run_claude_cli, "agy": _run_agy_cli}[provider]
-        raw = await runner(full_prompt)
+        raw = await runner(
+            full_prompt, model=role["model"], effort=role["effort"], add_dirs=add_dirs
+        )
     return _parse_json_response(raw)
 
 
@@ -541,22 +758,64 @@ async def review_scene_video(
             logger.info("Analyzing %d frames across %d sheets via CLI provider", n_frames, len(contact_sheets))
             result = await _analyze_cli(contact_sheets, n_frames, fps, scene)
 
-    # Parse structured errors with severity
+    # Parse structured errors with severity.
+    #
+    # The three fields are NOT equal, so they are not treated equally. Only
+    # `severity` can change the outcome: CRITICAL is what caps
+    # character_consistency at 3.0 and forces the score below "acceptable".
+    # This block used to require all three keys exactly and silently drop any
+    # entry that missed one, so a model writing `timeRange` turned "this video
+    # is unusable" into a clean pass. Now a missing time_range or description
+    # is repaired and logged — losing those costs the reader context, not the
+    # verdict — while an unrecognisable severity fails the scene, because at
+    # that point we genuinely do not know whether the video passed.
     errors = []
-    for e in result.get("errors", []):
-        if isinstance(e, dict) and "severity" in e and "time_range" in e and "description" in e:
-            errors.append(VideoError(
-                severity=e["severity"].upper(),
-                time_range=e["time_range"],
-                description=e["description"],
-            ))
-        elif isinstance(e, str):
-            # Fallback: plain string from older response format
+    repaired_fields = 0
+    for e in result.get("errors") or []:
+        if isinstance(e, str):
+            # Legacy shape: a bare sentence, no severity to lose.
             errors.append(VideoError(severity="HIGH", time_range="?", description=e))
+            continue
+        if not isinstance(e, dict):
+            raise RuntimeError(
+                f"review answer had an unreadable error entry: {str(e)[:200]}"
+            )
+
+        entry = _normalise_keys(e, _ERROR_KEY_ALIASES)
+        severity = str(entry.get("severity", "")).strip().upper()
+        if severity not in _SEVERITIES:
+            raise RuntimeError(
+                f"review answer had an error entry with no usable severity "
+                f"(expected one of {list(_SEVERITIES)}): {str(e)[:200]}"
+            )
+
+        time_range = entry.get("time_range")
+        if not isinstance(time_range, str) or not time_range.strip():
+            time_range = "?"  # the same placeholder the legacy string path uses
+            repaired_fields += 1
+        description = entry.get("description")
+        if not isinstance(description, str) or not description.strip():
+            description = "(no description given)"
+            repaired_fields += 1
+
+        errors.append(VideoError(
+            severity=severity, time_range=time_range, description=description,
+        ))
 
     has_critical = any(e.severity == "CRITICAL" for e in errors)
 
-    dims_raw = result.get("dimensions", {})
+    dims_raw = result.get("dimensions") or {}
+    if not isinstance(dims_raw, dict) or not dims_raw:
+        # Every field below has a 5.0 default, so an answer with no dimensions
+        # at all becomes a complete, plausible review: 5.0 across the board,
+        # verdict "poor", no errors. That is a fabricated score wearing the
+        # shape of a real one, and it reads as a bad video rather than a failed
+        # review. Refuse it — review_video logs and skips the scene.
+        raise RuntimeError(
+            f"{'CLI' if not ANTHROPIC_API_KEY else 'SDK'} answer had no dimensions: "
+            f"{str(result)[:300]}"
+        )
+
     dims = DimensionScores(
         character_consistency=float(dims_raw.get("character_consistency", 5.0)),
         prompt_adherence=float(dims_raw.get("prompt_adherence", 5.0)),
@@ -577,11 +836,34 @@ async def review_scene_video(
     if has_critical and overall > 5.9:
         overall = 5.9
 
-    usable_segments = [
-        SegmentScore(time_range=s["time_range"], score=float(s["score"]))
-        for s in result.get("usable_segments", [])
-        if isinstance(s, dict) and "time_range" in s and "score" in s
-    ]
+    # A segment that cannot be read is dropped rather than raised on: losing one
+    # errs toward "less usable footage", which cannot turn a bad video into a
+    # good score the way a lost CRITICAL can. It is still logged — the absence
+    # of any signal is what kept the error-entry version of this invisible.
+    usable_segments = []
+    dropped_segments = 0
+    for seg in result.get("usable_segments") or []:
+        if not isinstance(seg, dict):
+            dropped_segments += 1
+            continue
+        norm = _normalise_keys(seg, _SEGMENT_KEY_ALIASES)
+        try:
+            score = float(norm["score"])
+        except (KeyError, TypeError, ValueError):
+            dropped_segments += 1
+            continue
+        time_range = norm.get("time_range")
+        usable_segments.append(SegmentScore(
+            time_range=time_range if isinstance(time_range, str) and time_range.strip() else "?",
+            score=score,
+        ))
+
+    if repaired_fields or dropped_segments:
+        logger.warning(
+            "Scene %s: review answer needed repair — %d error field(s) defaulted, "
+            "%d usable segment(s) unreadable",
+            scene["id"], repaired_fields, dropped_segments,
+        )
 
     return SceneReview(
         scene_id=scene["id"],
