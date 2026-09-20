@@ -905,7 +905,17 @@ Dates are merge dates. Older releases are tagged; `git log` is the full record.
 ### v1.3.0 — 2026-09-20 — video review works again
 
 Video review had been failing on every path at once, which is why nothing about
-it looked fixable from the symptoms.
+it looked fixable from the symptoms. The unit suite was red on a normal dev
+machine for the whole period — 13 of these tests fail on v1.2.0 — while CI
+stayed green, because the workflow installs ffmpeg *and* a font and asserts
+`drawtext` renders. The one environment that ran the suite was the one
+environment where it worked.
+
+All three providers are verified end-to-end against the real CLIs: a synthetic
+clip with a planted mid-clip defect, through frame extraction, contact sheets
+and a live vision call, with no mocks. claude, agy and codex each find the
+defect and score it, on their default model and on an explicitly selected
+model + effort.
 
 | Date | Change |
 |---|---|
