@@ -1,13 +1,18 @@
 """CLI provider config API — which AI CLI, model and effort each role runs on.
 
-`active` is the legacy single-provider switch that `/fk-change-provider` and the
-statusline still use; `roles` is the per-role configuration the dashboard edits.
-The two are kept consistent by every write here, so neither reader ever sees a
-stale answer.
+`active` is the legacy single-provider switch; `roles` is the per-role
+configuration the dashboard edits. Every write here keeps the two consistent,
+so neither reader sees a stale answer.
+
+The only real consumer of `active` is `skills/fk-change-provider.md`
+(`scripts/statusline.sh` does not read it — its `active` matches are the
+unrelated `/api/active-project`). One reader is reason enough to keep the
+field in step; it is not reason to grow more of them.
 """
 import asyncio
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -48,9 +53,25 @@ def _read() -> dict:
 
 
 def _write(data: dict):
-    with open(_PROVIDERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    """Write atomically.
+
+    `open(..., "w")` truncates in place, so a crash or a full disk mid-write
+    leaves a truncated providers.json — which then 500s every request here and
+    hard-fails `agent/config.py`'s import, so the server will not boot at all.
+    That was survivable when this file changed on a rare provider switch; it is
+    written on every dashboard settings change now.
+    """
+    tmp = _PROVIDERS_FILE.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _PROVIDERS_FILE)  # atomic within the same directory
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _apply(data: dict):
@@ -152,7 +173,7 @@ async def patch_providers(body: dict):
             raise HTTPException(400, "'roles' must be an object keyed by role name")
         for role, entry in incoming.items():
             try:
-                roles[role] = validate_role_entry(role, entry)
+                roles[role] = await validate_role_entry(role, entry)
             except ValueError as e:
                 raise HTTPException(400, str(e))
         explicit = set(incoming)
@@ -165,7 +186,12 @@ async def patch_providers(body: dict):
             raise HTTPException(400, f"'{PROVIDER_BINARIES[provider]}' binary not found on PATH — install it first")
         data["active"] = provider
         # Switching the whole agent over has to carry the roles with it.
-        for role in list(roles) + [r for r in ROLES if r not in roles]:
+        # Only roles this build knows about. A name left behind by another
+        # version (or a typo in a hand-edited file) is neither rewritten here
+        # nor accepted by the `roles` path, which 400s on it — one policy for
+        # both, rather than silently adopting it on one and rejecting it on the
+        # other.
+        for role in ROLES:
             if role in explicit:
                 # The same request configured this role by name. That is the
                 # more specific instruction and it already passed validation —
@@ -188,8 +214,8 @@ async def patch_providers(body: dict):
     data["roles"] = roles
 
     if "active" not in body and roles:
-        # Keep the legacy field meaningful for /fk-change-provider and the
-        # statusline: it reports whatever the primary role runs on.
+        # Keep the legacy field meaningful for /fk-change-provider: it reports
+        # whatever the primary role runs on.
         primary = next(iter(ROLES))
         if primary in roles:
             data["active"] = roles[primary]["provider"]

@@ -128,18 +128,22 @@ def resolve_role(role: str) -> dict:
         )
         effort = None
 
-    return {
-        "provider": provider,
-        "model": entry.get("model") or None,
-        "effort": effort,
-    }
+    model = entry.get("model") or None
+    if model is not None and (not isinstance(model, str) or model.startswith("-")):
+        # The API refuses these, but providers.json is documented as safe to
+        # hand-edit, so the two paths have to agree on what is acceptable.
+        logger.warning("Dropping unusable model %r for role %r", model, role)
+        model = None
+
+    return {"provider": provider, "model": model, "effort": effort}
 
 
-def validate_role_entry(role: str, entry: dict) -> dict:
+async def validate_role_entry(role: str, entry: dict) -> dict:
     """Normalise one role entry from an API body. Raises ValueError on bad input.
 
-    The model is deliberately *not* checked against the catalog for claude and
-    codex — see PROVIDER_CATALOG_IS_AUTHORITATIVE.
+    The model is checked against the catalog only where the catalog is closed
+    (agy) — see PROVIDER_CATALOG_IS_AUTHORITATIVE. For claude and codex an
+    unlisted slug is a legitimate escape hatch, not a typo.
     """
     if role not in ROLES:
         raise ValueError(f"Unknown role '{role}'. Known: {sorted(ROLES)}")
@@ -172,11 +176,23 @@ def validate_role_entry(role: str, entry: dict) -> dict:
     if model is not None and not isinstance(model, str):
         raise ValueError(f"Model for role '{role}' must be a string or null")
     if model is not None and model.startswith("-"):
-        # The model is otherwise unvalidated on purpose (the escape hatch for a
-        # slug newer than any catalog), and it lands in argv next to --model.
-        # No real slug starts with a dash, and refusing them removes any
-        # argument left to have about what a CLI's parser does with one.
+        # The model is otherwise unvalidated for the open-catalog providers (the
+        # escape hatch for a slug newer than any catalog), and it lands in argv
+        # next to --model. No real slug starts with a dash, and refusing them
+        # removes any argument left to have about what a CLI's parser does.
         raise ValueError(f"Model for role '{role}' must not start with '-'")
+
+    if model is not None and PROVIDER_CATALOG_IS_AUTHORITATIVE[provider]:
+        # agy validates --model itself and errors out several seconds into the
+        # run. Catching it here is the difference between a 400 that names the
+        # options and a failed review. An empty catalog means the listing call
+        # failed, not that no models exist, so it must not block the write.
+        known = await list_models(provider)
+        if known and not any(m["id"] == model for m in known):
+            raise ValueError(
+                f"Unknown {provider} model '{model}'. {provider} rejects anything "
+                f"outside its own catalog; known: {[m['id'] for m in known]}"
+            )
 
     return {"provider": provider, "model": model, "effort": effort}
 
@@ -264,7 +280,7 @@ async def list_models(provider: str, force: bool = False) -> list[dict]:
     if not force:
         hit = _catalog_cache.get(provider)
         if hit and now - hit[0] < _CATALOG_TTL_S:
-            return hit[1]
+            return list(hit[1])
 
     if not shutil.which(PROVIDER_BINARIES[provider]):
         return []
@@ -282,7 +298,9 @@ async def list_models(provider: str, force: bool = False) -> list[dict]:
 
     if models:
         _catalog_cache[provider] = (now, models)
-    return models
+    # A copy: the cache is shared for five minutes and a caller that mutated
+    # the list it got back would corrupt it for every later reader.
+    return list(models)
 
 
 def clear_catalog_cache() -> None:

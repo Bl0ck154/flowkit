@@ -62,10 +62,12 @@ curl -s "http://127.0.0.1:8100/api/providers/models?provider=<provider>" | pytho
 
 - An **empty** `models` array is a normal answer, not an error — the binary is
   missing or the listing call failed. Fall back to the provider's default.
-- `authoritative: true` (agy only) means that list is the whole truth and agy
-  rejects anything outside it. For `claude` and `codex` an unlisted slug is a
-  legitimate escape hatch — claude takes aliases like `sonnet` and full model
-  names, codex takes slugs newer than its on-disk cache.
+- `authoritative: true` (agy only) means that list is the whole truth. The API
+  rejects a model outside it with a 400 naming the known slugs, rather than
+  letting agy reject it several seconds into the next review. For `claude` and
+  `codex` an unlisted slug is a legitimate escape hatch — claude takes aliases
+  like `sonnet` and full model names, codex takes slugs newer than its on-disk
+  cache — so those are not checked.
 - Offer only efforts from that provider's `efforts` array. **agy has no `xhigh`
   or `max`** and the API rejects them with a 400.
 - **If the provider has `model_encodes_effort: true` (agy), do not offer both.**
