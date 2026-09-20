@@ -47,20 +47,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
 
-      - name: Assert drawtext actually renders
-        # 13 of these tests burn a timestamp into extracted frames. Checking
-        # `ffmpeg -filters` only proves the filter is compiled in, not that a
-        # font exists, so render one frame through the same filter the tests
-        # use. Both failure modes surface here with a message that says what is
-        # wrong, instead of as 13 tests failing on "Filter not found".
+      - name: Report whether drawtext renders
+        # This used to fail the build, because naming an absent filter aborted
+        # the whole chain and took 13 tests down with it. video_reviewer.py now
+        # probes for drawtext and drops it when it is missing, so its absence
+        # is a supported degradation (sheets lose their burned-in timestamps)
+        # rather than a build breaker — and the fallback has its own coverage.
+        #
+        # The check stays because the timestamped path is the better one and a
+        # silent loss of it is worth seeing in the log. Checking
+        # `ffmpeg -filters` would only prove the filter is compiled in, not
+        # that a font exists, so render a real frame through the filter the
+        # code uses.
         run: |
           ffmpeg -hide_banner -loglevel error \
             -f lavfi -i "testsrc=duration=1:size=320x240:rate=5" \
             -vf "drawtext=text='%{pts\:hms}':x=5:y=5:fontsize=14:fontcolor=white:borderw=1:bordercolor=black" \
-            -frames:v 1 -y /tmp/drawtext-smoke.jpg || {
-              echo "::error::ffmpeg cannot render drawtext — missing --enable-libfreetype, or no font installed."
+            -frames:v 1 -y /tmp/drawtext-smoke.jpg \
+            && echo "drawtext renders — contact sheets will carry timestamps" \
+            || {
+              echo "::warning::ffmpeg cannot render drawtext (no --enable-libfreetype, or no font). Sheets will be untimestamped; the suite still covers that path."
               ffmpeg -hide_banner -version | head -3
-              exit 1
             }
 
       - name: Install dependencies
