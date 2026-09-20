@@ -550,7 +550,11 @@ Skills are `.md` recipes any AI coding-assistant CLI can read and follow — thi
 |-----|-------------|-----------------|
 | Claude Code | `CLAUDE.md` (auto-loaded) | Native `/fk-*` slash commands |
 | Codex CLI | `AGENTS.md` → reads `CLAUDE.md` | User says `/fk-<name>`, agent reads `skills/fk-<name>.md` |
-| Gemini CLI | `GEMINI.md` → reads `CLAUDE.md` | Same pattern |
+
+The Gemini CLI target was dropped in v1.3.1 — the CLI is retired, and its
+replacement `agy` reads none of what that target generated (see the changelog).
+`agy` is still supported, as one of the three CLIs that can run video review —
+that is configured in `agent/providers.json`, not by `setup.py`.
 
 ### AI Vision Providers (Video Review)
 
@@ -737,8 +741,7 @@ youtube/
         ├── channel_rules.json   # Upload rules + SEO defaults
         └── upload_history.json  # Upload log
 CLAUDE.md                # AI agent instructions (Claude Code)
-AGENTS.md                # AI agent instructions (Codex CLI)
-GEMINI.md                # AI agent instructions (Gemini CLI)
+AGENTS.md                # AI agent instructions (Codex CLI, generated)
 ```
 
 ## TTS Narration (OmniVoice)
@@ -901,6 +904,14 @@ From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
 ## Changelog
 
 Dates are merge dates. Older releases are tagged; `git log` is the full record.
+
+### v1.3.1 — 2026-09-20 — the dead Gemini target
+
+| Date | Change |
+|---|---|
+| 2026-09-20 | **`setup.py --tool gemini` removed.** It generated `.gemini/commands/fk/*.toml` and `GEMINI.md` for a CLI that is retired, and its replacement `agy` reads neither — verified against agy 1.2.7: a project's `.gemini/commands/*.toml` is not expanded, `.claude/commands/*.md` is not either, and `GEMINI.md`, `AGENTS.md` and `CLAUDE.md` are all absent from a print-mode run's context even inside a trusted folder. `agy plugin import` imports extensions, not command files. `GEMINI.md` is deleted; `setup.py clean` still removes what the target left on disk, because nothing else ever will. `agy` remains fully supported — as one of the three CLIs that run video review, configured in `agent/providers.json` rather than by `setup.py` |
+| 2026-09-20 | **`AGENTS.md` is genuinely generated again.** It says "do not edit" and had been edited anyway: rules 14-16 (fact-check, real-people bypass, review-before-upscale) and pipeline steps 0 and 7.5 lived only in the committed artifact, so `setup.py sync` would have deleted three operational rules. They are in `setup.py` now. The same drift had left the skill table listing 25 skills — missing 11 that exist and naming one that does not; it is rebuilt from `skills/` at generation time |
+| 2026-09-20 | `setup.py` gains its first tests (13), including that a `.fk-setup.json` written before this release — which records `"gemini"` — is skipped with a pointer to `clean` instead of crashing the sync |
 
 ### v1.3.0 — 2026-09-20 — video review works again
 
