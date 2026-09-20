@@ -88,7 +88,9 @@ class UpscaleVideoRequest(BaseModel):
 
 
 class UploadImageRequest(BaseModel):
-    file_path: str  # absolute path to local image file
+    file_path: Optional[str] = None  # absolute path visible to Flowkit service
+    image_base64: Optional[str] = None  # direct bytes for external callers
+    mime_type: Optional[str] = None
     project_id: str = ""
     file_name: str = "image.png"
 
@@ -482,13 +484,24 @@ async def upload_image(body: UploadImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    try:
-        with open(body.file_path, "rb") as f:
-            image_bytes = f.read()
-    except FileNotFoundError:
-        raise HTTPException(404, f"File not found: {body.file_path}")
+    if body.image_base64:
+        try:
+            image_bytes = base64.b64decode(body.image_base64, validate=True)
+        except Exception as exc:
+            raise HTTPException(422, "image_base64 is not valid base64") from exc
+        if not image_bytes:
+            raise HTTPException(422, "image_base64 is empty")
+        mime = body.mime_type or mimetypes.guess_type(body.file_name)[0] or "image/png"
+    elif body.file_path:
+        try:
+            with open(body.file_path, "rb") as f:
+                image_bytes = f.read()
+        except FileNotFoundError:
+            raise HTTPException(404, f"File not found: {body.file_path}")
+        mime = body.mime_type or mimetypes.guess_type(body.file_path)[0] or "image/png"
+    else:
+        raise HTTPException(422, "file_path or image_base64 is required")
     b64 = base64.b64encode(image_bytes).decode()
-    mime = mimetypes.guess_type(body.file_path)[0] or "image/png"
     result = await client.upload_image(b64, mime_type=mime, project_id=body.project_id, file_name=body.file_name)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
