@@ -11,9 +11,7 @@ agent/active_project.json
 
 # Generated AI tool configs (run: python setup.py)
 .claude/commands/fk-*
-.gemini/commands/
 AGENTS.md
-GEMINI.md
 .fk-setup.json
 
 # design-sync (staged converter scripts, build output, machine state)

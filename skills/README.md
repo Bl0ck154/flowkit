@@ -47,10 +47,19 @@ python setup.py clean     # Remove generated configs
 | Tool | Generated Config | Instruction File | Invocation |
 |------|-----------------|------------------|------------|
 | Claude Code | `.claude/commands/fk-<name>.md` (stubs) | `CLAUDE.md` (committed) | `/fk-<name>` |
-| Gemini CLI | `.gemini/commands/fk/<name>.toml` | `GEMINI.md` (generated) | `/fk-<name>` |
 | Codex CLI | — | `AGENTS.md` (generated) | Read `skills/fk-<name>.md` |
 
+`agy` (Antigravity) is not a target here: it expands neither `.gemini/commands/*.toml`
+nor `.claude/commands/*.md`, and does not auto-load `AGENTS.md`, `GEMINI.md` or
+`CLAUDE.md` in print mode. It is supported as a **video-review provider**
+instead — see `/fk-change-provider`.
+
 **Adding a new skill:** Create `skills/fk-<name>.md`, then run `python setup.py sync`.
+
+**Never hand-edit `AGENTS.md`** — it says so at the top and it means it. Rules
+added there directly are deleted by the next `sync`. Put them in `setup.py`'s
+`_CRITICAL_RULES` or `_PIPELINE_OVERVIEW` instead, which is where the file is
+built from.
 
 ---
 
