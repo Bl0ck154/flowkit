@@ -45,6 +45,45 @@ def make_proc(stdout=b"", stderr=b"", returncode=0):
 
 class TestRunClaudeCli:
     @pytest.mark.asyncio
+    async def test_model_effort_and_add_dirs_reach_the_argv(self):
+        """The default provider's new arguments. agy had three tests for this
+        and claude had none, which is backwards — claude is what runs unless
+        someone changes the setting."""
+        proc = make_proc(stdout=b"ok", returncode=0)
+        with patch(
+            "agent.services.video_reviewer.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=proc),
+        ) as mock_exec:
+            await _run_claude_cli(
+                "hello", model="sonnet", effort="high", add_dirs=("/tmp/sheets",))
+        argv = mock_exec.call_args[0]
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+        assert argv[argv.index("--add-dir") + 1] == "/tmp/sheets"
+        # Unlike agy, claude's model does not encode the effort, so both stay.
+        assert "--effort" in argv and "--model" in argv
+
+    @pytest.mark.asyncio
+    async def test_a_failure_carries_both_streams(self):
+        """claude puts the readable sentence on stdout and buries the machine
+        tag under paragraphs of unrelated context advice on stderr. Dropping
+        stdout left the operator reading about token windows."""
+        proc = make_proc(
+            stdout=b"There's an issue with the selected model (nope-xyz).",
+            stderr=b"[claude-code:unrecognized_model] {\"model\":\"nope-xyz\"}",
+            returncode=1,
+        )
+        with patch(
+            "agent.services.video_reviewer.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=proc),
+        ):
+            with pytest.raises(RuntimeError) as excinfo:
+                await _run_claude_cli("hello", model="nope-xyz")
+        message = str(excinfo.value)
+        assert "unrecognized_model" in message      # stderr tail
+        assert "issue with the selected model" in message  # stdout, previously dropped
+
+    @pytest.mark.asyncio
     async def test_argv_and_return_value(self):
         proc = make_proc(stdout=b'{"ok": true}', stderr=b"", returncode=0)
         with patch(
@@ -492,6 +531,12 @@ class TestBuildPromptSheetNote:
 # agent/api/providers.py :: patch_providers
 # ---------------------------------------------------------------------------
 
+FAKE_AGY_CATALOG = [
+    {"id": "gemini-3.8-flash-low", "label": "Gemini 3.8 Flash (Low)"},
+    {"id": "gemini-3.1-pro-high", "label": "Gemini 3.1 Pro (High)"},
+]
+
+
 @pytest.fixture
 def providers_file(monkeypatch, tmp_path):
     """Point the API at a throwaway providers.json and isolate config."""
@@ -500,6 +545,15 @@ def providers_file(monkeypatch, tmp_path):
     monkeypatch.setattr(providers_api, "_PROVIDERS_FILE", tmp_file)
     monkeypatch.setattr(providers_api.shutil, "which", lambda binary: "/usr/local/bin/fake")
     monkeypatch.setattr(cli_providers.shutil, "which", lambda binary: "/usr/local/bin/fake")
+    # Stub the catalog. Validating an agy model otherwise spawns a real
+    # `agy models`, which makes these tests depend on a signed-in CLI and pass
+    # in CI only because the missing binary degrades to an empty catalog.
+    # Enforcement itself is covered in TestValidateRoleEntry.
+    monkeypatch.setattr(
+        cli_providers, "list_models",
+        AsyncMock(side_effect=lambda provider, force=False: list(
+            FAKE_AGY_CATALOG if provider == "agy" else [])),
+    )
     # Ensure config.CLI_PROVIDERS mutation doesn't leak to other tests.
     monkeypatch.setattr(
         providers_api.config, "CLI_PROVIDERS",
@@ -622,6 +676,32 @@ class TestPatchProviders:
             "provider": "claude", "model": "opus", "effort": "high"}
 
     @pytest.mark.asyncio
+    async def test_roles_patch_rejects_an_agy_model_outside_its_catalog(self, providers_file):
+        """agy's catalog is closed and it rejects anything else itself — several
+        seconds into the next review, with a raw CLI error. A 400 that names the
+        known slugs is the whole reason this module exists."""
+        with pytest.raises(HTTPException) as excinfo:
+            await providers_api.patch_providers({"roles": {"video_review": {
+                "provider": "agy", "model": "gemini-9-does-not-exist"}}})
+        assert excinfo.value.status_code == 400
+        assert "gemini-3.8-flash-low" in excinfo.value.detail
+
+    @pytest.mark.asyncio
+    async def test_roles_patch_leaves_an_unknown_role_in_the_file_alone(self, providers_file):
+        """An `active` sweep used to silently adopt a role name this build does
+        not know, while the `roles` path 400s on the same name. One policy for
+        both: names outside ROLES are neither rewritten nor accepted."""
+        providers_file.write_text(json.dumps({"active": "claude", "roles": {
+            "legacy_role": {"provider": "agy", "model": None, "effort": None},
+            "video_review": {"provider": "claude", "model": None, "effort": None}}}))
+
+        result = await providers_api.patch_providers({"active": "codex"})
+
+        assert result["roles"]["video_review"]["provider"] == "codex"
+        assert result["roles"]["legacy_role"] == {
+            "provider": "agy", "model": None, "effort": None}
+
+    @pytest.mark.asyncio
     async def test_roles_patch_keeps_active_in_step(self, providers_file):
         """`active` is what /fk-change-provider and the statusline read. If the
         dashboard can move video_review without moving `active`, those two
@@ -716,34 +796,74 @@ class TestResolveRole:
         assert cli_providers.resolve_role("video_review")["provider"] == "claude"
 
 
+@pytest.fixture
+def fake_binaries(monkeypatch):
+    monkeypatch.setattr(cli_providers.shutil, "which", lambda b: "/bin/fake")
+
+
 class TestValidateRoleEntry:
-    def test_missing_binary_is_rejected(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_missing_binary_is_rejected(self, monkeypatch):
         monkeypatch.setattr(cli_providers.shutil, "which", lambda b: None)
         with pytest.raises(ValueError, match="not found on PATH"):
-            cli_providers.validate_role_entry("video_review", {"provider": "claude"})
+            await cli_providers.validate_role_entry("video_review", {"provider": "claude"})
 
-    def test_non_string_model_is_rejected(self, monkeypatch):
-        monkeypatch.setattr(cli_providers.shutil, "which", lambda b: "/bin/fake")
+    @pytest.mark.asyncio
+    async def test_non_string_model_is_rejected(self, fake_binaries):
         with pytest.raises(ValueError, match="string or null"):
-            cli_providers.validate_role_entry("video_review", {"provider": "claude", "model": 7})
+            await cli_providers.validate_role_entry(
+                "video_review", {"provider": "claude", "model": 7})
 
-    def test_a_model_starting_with_a_dash_is_rejected(self, monkeypatch):
-        """Models are otherwise unvalidated on purpose, and the value lands in
-        argv right after --model. Nothing legitimate starts with a dash."""
-        monkeypatch.setattr(cli_providers.shutil, "which", lambda b: "/bin/fake")
+    @pytest.mark.asyncio
+    async def test_a_model_starting_with_a_dash_is_rejected(self, fake_binaries):
+        """Models are unvalidated for the open-catalog providers on purpose,
+        and the value lands in argv right after --model. Nothing legitimate
+        starts with a dash."""
         with pytest.raises(ValueError, match="must not start with"):
-            cli_providers.validate_role_entry(
+            await cli_providers.validate_role_entry(
                 "video_review",
                 {"provider": "claude", "model": "--dangerously-skip-permissions"},
             )
 
-    def test_blank_model_and_effort_normalise_to_none(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_blank_model_and_effort_normalise_to_none(self, fake_binaries):
         """The dashboard's "Default" option sends an empty value; it must mean
         "let the CLI decide", not an empty --model argument."""
-        monkeypatch.setattr(cli_providers.shutil, "which", lambda b: "/bin/fake")
-        assert cli_providers.validate_role_entry(
+        assert await cli_providers.validate_role_entry(
             "video_review", {"provider": "claude", "model": "", "effort": ""}
         ) == {"provider": "claude", "model": None, "effort": None}
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_model_is_rejected_where_the_catalog_is_closed(
+        self, fake_binaries
+    ):
+        """agy validates --model itself and errors out several seconds into the
+        run. Catching it here is the difference between a 400 that names the
+        options and a failed review."""
+        with patch.object(cli_providers, "list_models", new=AsyncMock(
+                return_value=[{"id": "gemini-3.8-flash-low", "label": "x"}])):
+            with pytest.raises(ValueError, match="Unknown agy model"):
+                await cli_providers.validate_role_entry(
+                    "video_review", {"provider": "agy", "model": "gemini-9-nope"})
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_model_passes_where_the_catalog_is_open(self, fake_binaries):
+        """claude takes aliases and full names, codex takes slugs newer than
+        its cache. Validating those would break the day a new model ships."""
+        with patch.object(cli_providers, "list_models", new=AsyncMock(return_value=[])):
+            entry = await cli_providers.validate_role_entry(
+                "video_review", {"provider": "claude", "model": "claude-brand-new"})
+        assert entry["model"] == "claude-brand-new"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_catalog_does_not_block_the_write(self, fake_binaries):
+        """Emptiness means the listing call failed, not that agy has no models.
+        Blocking on it would make a transient `agy models` failure look like a
+        rejected setting."""
+        with patch.object(cli_providers, "list_models", new=AsyncMock(return_value=[])):
+            entry = await cli_providers.validate_role_entry(
+                "video_review", {"provider": "agy", "model": "gemini-3.8-flash-low"})
+        assert entry["model"] == "gemini-3.8-flash-low"
 
 
 # ---------------------------------------------------------------------------
@@ -828,6 +948,67 @@ class TestModelCatalogs:
 # ---------------------------------------------------------------------------
 # ffmpeg drawtext fallback
 # ---------------------------------------------------------------------------
+
+# Real rows from `ffmpeg -hide_banner -filters`, kept verbatim: the probe is a
+# regex over this exact shape and has never been run against it in a test.
+_FILTERS_WITH_DRAWTEXT = """\
+Filters:
+  T.. = Timeline support
+ ... drawbox           V->V       Draw a colored box on the input video.
+ T.C drawtext          V->V       Draw text on top of video frames using libfreetype library.
+ ... scale             V->V       Scale the input video size and/or convert the image format.
+"""
+
+_FILTERS_WITHOUT_DRAWTEXT = """\
+Filters:
+  T.. = Timeline support
+ ... drawbox           V->V       Draw a colored box on the input video.
+ ... drawgraph         V->V       Draw a graph using input video metadata.
+ ... scale             V->V       Scale the input video size and/or convert the image format.
+"""
+
+
+class TestHasDrawtext:
+    """The one function whose misbehaviour re-breaks every review. Both
+    _frame_filter tests stub it out, so without this its regex never runs
+    against real `ffmpeg -filters` output."""
+
+    @staticmethod
+    def _probe(stdout, returncode=0):
+        import agent.services.video_reviewer as vr
+        vr._has_drawtext.cache_clear()
+        completed = MagicMock(stdout=stdout, stderr="", returncode=returncode)
+        try:
+            with patch("agent.services.video_reviewer.subprocess.run", return_value=completed):
+                return vr._has_drawtext()
+        finally:
+            vr._has_drawtext.cache_clear()
+
+    def test_finds_drawtext_in_a_real_filter_listing(self):
+        assert self._probe(_FILTERS_WITH_DRAWTEXT) is True
+
+    def test_absent_drawtext_is_detected(self):
+        assert self._probe(_FILTERS_WITHOUT_DRAWTEXT) is False
+
+    def test_a_description_mentioning_drawtext_is_not_a_match(self):
+        """The filter name is the second whitespace-delimited token. Matching
+        anywhere on the line would make any filter whose description mentions
+        drawtext a false positive — and a false positive here puts an absent
+        filter back into the chain, which aborts extraction entirely."""
+        listing = " ... overlay           V->V       Like drawtext but for images.\n"
+        assert self._probe(listing) is False
+
+    def test_an_ffmpeg_that_cannot_be_run_reports_no_drawtext(self):
+        """Fail safe: an unusable ffmpeg must not claim the filter is there."""
+        import agent.services.video_reviewer as vr
+        vr._has_drawtext.cache_clear()
+        try:
+            with patch("agent.services.video_reviewer.subprocess.run",
+                       side_effect=OSError("no ffmpeg")):
+                assert vr._has_drawtext() is False
+        finally:
+            vr._has_drawtext.cache_clear()
+
 
 class TestFrameFilter:
     def test_includes_drawtext_when_ffmpeg_has_it(self, monkeypatch):

@@ -222,10 +222,12 @@ def _has_drawtext() -> bool:
     return present
 
 
-def _frame_filter(fps: float) -> str:
+def _frame_filter(fps: float, drawtext: bool | None = None) -> str:
     """Filter chain for contact-sheet frames, timestamped where ffmpeg allows."""
+    if drawtext is None:
+        drawtext = _has_drawtext()
     chain = f"fps={fps},scale=320:-1"
-    if _has_drawtext():
+    if drawtext:
         chain += (
             ",drawtext=text='%{pts\\:hms}':x=5:y=5:fontsize=14:"
             "fontcolor=white:borderw=1:bordercolor=black"
@@ -233,23 +235,49 @@ def _frame_filter(fps: float) -> str:
     return chain
 
 
-def _create_contact_sheets(video_path: str, fps: float, out_dir: str) -> tuple[list[Path], int]:
+def _create_contact_sheets(
+    video_path: str, fps: float, out_dir: str
+) -> tuple[list[Path], int, bool]:
     """Extract all frames and tile them into REVIEW_SHEET_COLSxREVIEW_SHEET_ROWS sheets.
 
-    Frames carry burned-in timestamps only where ffmpeg has `drawtext` — see
-    `_frame_filter`. `_analyze_cli` words the prompt to match either way.
+    Returns (sheet_paths in chronological order, total_frames after any
+    REVIEW_MAX_FRAMES cap, whether the frames carry burned-in timestamps).
 
-    Returns (sheet_paths in chronological order, total_frames after any REVIEW_MAX_FRAMES cap).
+    The caller is told what actually happened rather than re-deriving it from
+    `_has_drawtext()`: extraction can fall back to untimestamped frames at
+    runtime even on a build that lists the filter, and `_analyze_cli` has to
+    word the prompt for the sheets it really got.
     """
     frames_dir = Path(out_dir) / "frames"
     frames_dir.mkdir(exist_ok=True)
-    extract_cmd = [
-        "ffmpeg", "-y", "-i", video_path,
-        "-vf", _frame_filter(fps),
-        "-q:v", "2",
-        f"{frames_dir}/frame_%04d.jpg",
-    ]
-    result = subprocess.run(extract_cmd, capture_output=True, text=True)
+
+    def _extract(with_drawtext: bool):
+        return subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", _frame_filter(fps, with_drawtext),
+                "-q:v", "2",
+                f"{frames_dir}/frame_%04d.jpg",
+            ],
+            capture_output=True, text=True,
+        )
+
+    timestamped = _has_drawtext()
+    result = _extract(timestamped)
+    if result.returncode != 0 and timestamped:
+        # The probe proves drawtext is compiled in, not that it can render. An
+        # ffmpeg with libfreetype but no resolvable font lists the filter and
+        # then dies on "Cannot find a valid font for the family Sans" — the
+        # original symptom all over again, on a box where the probe says
+        # everything is fine. One retry makes the probe an optimisation rather
+        # than a load-bearing correctness check.
+        tail = (result.stderr or "").strip().splitlines()
+        logger.warning(
+            "Frame extraction failed with drawtext (%s) — retrying untimestamped",
+            tail[-1] if tail else "no stderr",
+        )
+        timestamped = False
+        result = _extract(False)
     if result.returncode != 0:
         raise RuntimeError(f"Frame extraction failed: {result.stderr[-500:]}")
 
@@ -285,7 +313,7 @@ def _create_contact_sheets(video_path: str, fps: float, out_dir: str) -> tuple[l
             raise RuntimeError(f"Contact sheet tiling failed: {result.stderr[-500:]}")
         sheets.append(output)
 
-    return sheets, len(frames)
+    return sheets, len(frames), timestamped
 
 
 # ─── Claude Vision analysis ───────────────────────────────────
@@ -442,7 +470,15 @@ async def _spawn_and_check(args: tuple, provider: str) -> bytes:
     )
     stdout, stderr = await _communicate_with_timeout(proc, provider)
     if proc.returncode != 0:
-        raise RuntimeError(f"{provider} CLI failed (rc={proc.returncode}): {stderr.decode()[-500:]}")
+        # Both streams. claude puts the readable sentence on stdout ("There's an
+        # issue with the selected model (...)") and buries the machine tag under
+        # paragraphs of unrelated context advice on stderr; codex is the other
+        # way round. Tail-slice each, because the useful part is always last.
+        detail = stderr.decode()[-500:]
+        out = stdout.decode().strip()
+        if out:
+            detail = f"{detail} | stdout: {out[-300:]}"
+        raise RuntimeError(f"{provider} CLI failed (rc={proc.returncode}): {detail}")
     return stdout
 
 
@@ -603,14 +639,20 @@ async def _analyze_cli(
     fps: float,
     scene: dict,
     timestamped: bool | None = None,
+    role: dict | None = None,
 ) -> dict:
-    """Analyze contact sheets via the CLI provider configured for video_review."""
+    """Analyze contact sheets via the CLI provider configured for video_review.
+
+    `role` is passed in by a multi-scene review so every scene runs on the same
+    backend — see `review_video`.
+    """
     if timestamped is None:
         timestamped = _has_drawtext()
     n_sheets = len(contact_sheets)
     base_prompt = _build_prompt(n_frames, fps, n_sheets, scene)
 
-    role = resolve_role("video_review")
+    if role is None:
+        role = resolve_role("video_review")
     provider = role["provider"]
     logger.info(
         "Calling %s CLI for vision analysis (%d frames, %d sheets, model=%s, effort=%s, timestamps=%s)",
@@ -707,8 +749,13 @@ async def review_scene_video(
     mode: str = "light",
     orientation: str = "VERTICAL",
     project_id: str = None,
+    role: dict | None = None,
 ) -> SceneReview:
-    """Review a single scene's video via frame extraction + Claude Vision."""
+    """Review a single scene's video via frame extraction + Claude Vision.
+
+    `role` pins the provider/model/effort. `review_video` resolves it once and
+    passes it down; a single-scene call resolves it here.
+    """
     fps = REVIEW_FPS_DEEP if mode == "deep" else REVIEW_FPS_LIGHT
 
     orient_prefix = "vertical" if orientation.upper() == "VERTICAL" else "horizontal"
@@ -750,13 +797,16 @@ async def review_scene_video(
         else:
             # CLI path: contact sheets (no API key needed)
             logger.info("Creating contact sheets at %sfps (CLI mode)", fps)
-            contact_sheets, n_frames = await asyncio.get_event_loop().run_in_executor(
+            contact_sheets, n_frames, timestamped = await asyncio.get_event_loop().run_in_executor(
                 None, _create_contact_sheets, str(video_path), fps, tmp
             )
             if not contact_sheets or not all(s.exists() for s in contact_sheets):
                 raise RuntimeError(f"Contact sheets not created for scene {scene['id']}")
             logger.info("Analyzing %d frames across %d sheets via CLI provider", n_frames, len(contact_sheets))
-            result = await _analyze_cli(contact_sheets, n_frames, fps, scene)
+            result = await _analyze_cli(
+                contact_sheets, n_frames, fps, scene,
+                timestamped=timestamped, role=role,
+            )
 
     # Parse structured errors with severity.
     #
@@ -893,6 +943,18 @@ async def review_video(
         scenes = [s for s in scenes if s["id"] in id_set]
     characters = await get_project_characters(project_id)
 
+    # Resolved once, for the whole review. Each scene awaits a download, an
+    # executor hop and a subprocess, so the loop below yields repeatedly — and
+    # providers.json is documented as safe to hand-edit, while a dashboard GET
+    # hot-reloads it. Resolving per scene let scenes 4..N run on a different
+    # backend than scenes 1..3, and `overall_score` then averages two of them
+    # with no record of which produced what.
+    role = resolve_role("video_review")
+    logger.info(
+        "Reviewing %s on %s (model=%s, effort=%s)",
+        video_id, role["provider"], role["model"] or "default", role["effort"] or "default",
+    )
+
     orient_prefix = "vertical" if orientation.upper() == "VERTICAL" else "horizontal"
 
     scene_reviews = []
@@ -906,7 +968,10 @@ async def review_video(
             continue
 
         try:
-            review = await review_scene_video(scene, characters, mode=mode, orientation=orientation, project_id=project_id)
+            review = await review_scene_video(
+                scene, characters, mode=mode, orientation=orientation,
+                project_id=project_id, role=role,
+            )
             scene_reviews.append(review)
         except Exception as e:
             logger.error("Failed to review scene %s: %s", scene["id"], e)

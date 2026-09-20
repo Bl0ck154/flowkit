@@ -33,7 +33,7 @@ class TestCreateContactSheetsChunking:
     def test_2s_video_at_4fps_produces_correct_sheet_count(self, synthetic_video):
         # 2s * 4fps = 8 frames -> ceil(8/9) = 1 sheet
         with tempfile.TemporaryDirectory() as out_dir:
-            sheets, total_frames = _create_contact_sheets(str(synthetic_video), 4, out_dir)
+            sheets, total_frames, _timestamped = _create_contact_sheets(str(synthetic_video), 4, out_dir)
             assert total_frames == 8
             assert len(sheets) == 1
             assert all(s.exists() and s.stat().st_size > 0 for s in sheets)
@@ -41,7 +41,7 @@ class TestCreateContactSheetsChunking:
     def test_2s_video_at_8fps_produces_correct_sheet_count(self, synthetic_video):
         # 2s * 8fps = 16 frames -> ceil(16/9) = 2 sheets
         with tempfile.TemporaryDirectory() as out_dir:
-            sheets, total_frames = _create_contact_sheets(str(synthetic_video), 8, out_dir)
+            sheets, total_frames, _timestamped = _create_contact_sheets(str(synthetic_video), 8, out_dir)
             assert total_frames == 16
             assert len(sheets) == 2
             assert all(s.exists() and s.stat().st_size > 0 for s in sheets)
@@ -50,7 +50,7 @@ class TestCreateContactSheetsChunking:
         import agent.services.video_reviewer as vr
         monkeypatch.setattr(vr, "REVIEW_MAX_FRAMES", 5)
         with tempfile.TemporaryDirectory() as out_dir:
-            sheets, total_frames = _create_contact_sheets(str(synthetic_video), 8, out_dir)
+            sheets, total_frames, _timestamped = _create_contact_sheets(str(synthetic_video), 8, out_dir)
             # 16 natural frames capped to 5 -> ceil(5/9) = 1 sheet
             assert total_frames == 5
             assert len(sheets) == 1
@@ -71,7 +71,7 @@ class TestCreateContactSheetsChunking:
         monkeypatch.setattr(vr, "REVIEW_MAX_FRAMES", 20)
         out_dir = tempfile.mkdtemp()
         try:
-            sheets, total_frames = _create_contact_sheets(str(synthetic_video), 30, out_dir)
+            sheets, total_frames, _timestamped = _create_contact_sheets(str(synthetic_video), 30, out_dir)
             assert total_frames == 20
             assert len(sheets) == 3
 
@@ -120,7 +120,7 @@ class TestCreateContactSheetsChunking:
         monkeypatch.setattr(vr, "REVIEW_MAX_FRAMES", chunk_size)
         out_dir = tempfile.mkdtemp()
         try:
-            sheets, total_frames = _create_contact_sheets(str(synthetic_video), 30, out_dir)
+            sheets, total_frames, _timestamped = _create_contact_sheets(str(synthetic_video), 30, out_dir)
             assert total_frames == chunk_size
             assert len(sheets) == 1
             probe = subprocess.run(
@@ -162,9 +162,9 @@ class TestReviewScoringRefusesAFabricatedScore:
         def fake_sheets(video_path, fps, out_dir):
             sheet = Path(out_dir) / "sheet_00.jpg"
             sheet.write_bytes(b"jpeg")
-            return [sheet], 9
+            return [sheet], 9, True
 
-        async def fake_analyze(sheets, n_frames, fps, scene, timestamped=None):
+        async def fake_analyze(sheets, n_frames, fps, scene, timestamped=None, role=None):
             return analysis
 
         monkeypatch.setattr(vr, "ANTHROPIC_API_KEY", "")
@@ -307,3 +307,111 @@ class TestReviewScoringRefusesAFabricatedScore:
         review = await vr.review_scene_video(dict(self.SCENE), [])
         assert [e.description for e in review.errors] == ["camera drifts after 4s"]
         assert review.errors[0].severity == "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# drawtext: the probe is an optimisation, not a correctness check
+# ---------------------------------------------------------------------------
+
+class TestDrawtextRuntimeFallback:
+    def test_extraction_retries_without_drawtext_when_the_filter_fails(
+        self, synthetic_video, monkeypatch
+    ):
+        """`ffmpeg -filters` proves drawtext is compiled in, not that it can
+        render. A build with libfreetype but no resolvable font lists the
+        filter and then dies on "Cannot find a valid font for the family Sans"
+        — the original symptom again, on a box where the probe says everything
+        is fine. One retry makes the probe an optimisation.
+
+        The failure is forced through `_frame_filter` rather than by trusting
+        this machine's ffmpeg, so the retry is exercised on a runner that has a
+        working drawtext as well as on one that has none.
+        """
+        import agent.services.video_reviewer as vr
+
+        seen = []
+
+        def fake_filter(fps, drawtext=None):
+            seen.append(drawtext)
+            chain = f"fps={fps},scale=320:-1"
+            return chain + ",definitely_not_a_real_filter" if drawtext else chain
+
+        monkeypatch.setattr(vr, "_has_drawtext", lambda: True)
+        monkeypatch.setattr(vr, "_frame_filter", fake_filter)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            sheets, total_frames, timestamped = vr._create_contact_sheets(
+                str(synthetic_video), 4, out_dir)
+
+            assert seen == [True, False]     # tried timestamped, then fell back
+            assert timestamped is False      # and says so, rather than guessing
+            assert total_frames == 8
+            assert len(sheets) == 1 and sheets[0].stat().st_size > 0
+
+    def test_a_failure_unrelated_to_drawtext_is_not_retried_away(
+        self, synthetic_video, monkeypatch
+    ):
+        """The retry exists for one cause. A genuinely broken input must still
+        surface as an error instead of being masked by a second attempt."""
+        import agent.services.video_reviewer as vr
+
+        monkeypatch.setattr(vr, "_has_drawtext", lambda: False)
+        with tempfile.TemporaryDirectory() as out_dir:
+            with pytest.raises(RuntimeError, match="Frame extraction failed"):
+                vr._create_contact_sheets(str(Path(out_dir) / "nope.mp4"), 4, out_dir)
+
+
+# ---------------------------------------------------------------------------
+# one review, one provider
+# ---------------------------------------------------------------------------
+
+class TestRoleIsPinnedForTheWholeReview:
+    @pytest.mark.asyncio
+    async def test_the_role_is_resolved_once_and_reused_for_every_scene(self, monkeypatch):
+        """Each scene awaits a download, an executor hop and a subprocess, so
+        the loop yields repeatedly — and providers.json is documented as safe
+        to hand-edit while a dashboard GET hot-reloads it. Resolving per scene
+        let scenes 4..N run on a different backend than scenes 1..3, and
+        `overall_score` then averages two of them with no record of which
+        produced what.
+        """
+        import agent.services.video_reviewer as vr
+
+        scenes = [{"id": f"s{i}", "vertical_video_url": f"https://example.test/{i}.mp4"}
+                  for i in range(3)]
+
+        async def fake_list_scenes(vid):
+            return scenes
+
+        async def fake_characters(pid):
+            return []
+
+        resolved = []
+
+        def fake_resolve(role_name):
+            resolved.append(role_name)
+            return {"provider": "claude", "model": "sonnet", "effort": "high"}
+
+        seen_roles = []
+
+        async def fake_scene_review(scene, characters, **kwargs):
+            seen_roles.append(kwargs.get("role"))
+            return vr.SceneReview(
+                scene_id=scene["id"], overall_score=8.0, verdict="good",
+                dimensions=vr.DimensionScores(
+                    character_consistency=8.0, prompt_adherence=8.0, motion_quality=8.0,
+                    visual_fidelity=8.0, temporal_coherence=8.0, composition=8.0),
+                errors=[], usable_segments=[], fix_guide="", frames_analyzed=9, fps_used=4.0)
+
+        monkeypatch.setattr(vr, "list_scenes", fake_list_scenes)
+        monkeypatch.setattr(vr, "get_project_characters", fake_characters)
+        monkeypatch.setattr(vr, "resolve_role", fake_resolve)
+        monkeypatch.setattr(vr, "review_scene_video", fake_scene_review)
+
+        review = await vr.review_video("v1", "p1")
+
+        assert resolved == ["video_review"]          # once, not once per scene
+        assert len(seen_roles) == 3
+        assert all(r == {"provider": "claude", "model": "sonnet", "effort": "high"}
+                   for r in seen_roles)
+        assert review.scenes_reviewed == 3
