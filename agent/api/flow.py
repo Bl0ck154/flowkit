@@ -185,6 +185,7 @@ async def extension_status():
             "min_interval_s": FLOW_GENERATION_MIN_INTERVAL_S,
             "max_concurrent": FLOW_GENERATION_MAX_CONCURRENT,
             "unusual_activity_cooldown_s": FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+            **client.generation_guard_status,
         },
         "session_project": current_session_project(),
     }

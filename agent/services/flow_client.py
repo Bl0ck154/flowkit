@@ -77,6 +77,8 @@ class FlowClient:
         self._generation_rate_gate = asyncio.Lock()
         self._generation_last_submit_at = 0.0
         self._generation_unusual_until = 0.0
+        self._generation_last_unusual_at: Optional[float] = None
+        self._generation_last_unusual_rpc: Optional[str] = None
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -208,6 +210,16 @@ class FlowClient:
     @property
     def connected(self) -> bool:
         return bool(self._extensions)
+
+    @property
+    def generation_guard_status(self) -> dict:
+        remaining = max(0.0, self._generation_unusual_until - time.monotonic())
+        return {
+            "cooldown_active": remaining > 0,
+            "cooldown_remaining_s": round(remaining, 3),
+            "last_unusual_activity_at": self._generation_last_unusual_at,
+            "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
+        }
 
     @property
     def ws_stats(self) -> dict:
@@ -604,6 +616,8 @@ class FlowClient:
                     self._generation_unusual_until,
                     time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
                 )
+                self._generation_last_unusual_at = time.time()
+                self._generation_last_unusual_rpc = rpcid
                 logger.warning(
                     "Google unusual-activity block detected; pausing generation submits for %.0fs",
                     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
