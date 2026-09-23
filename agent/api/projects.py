@@ -172,8 +172,8 @@ async def create(body: ProjectCreate):
 
     detected_tier = await _detect_user_tier(client)
 
-    # Flow no longer creates projects for us — the uuid comes from the request
-    # or from FLOW_PROJECT_ID.
+    # Explicit flow_project_id means intentional reuse. Otherwise create a
+    # fresh real Flow project through the current batchexecute endpoint.
     flow_project_id = client.flow_project_id(body.flow_project_id)
     if flow_project_id:
         logger.info("Flow project reused: %s", flow_project_id)

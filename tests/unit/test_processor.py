@@ -170,6 +170,24 @@ class TestHandleFailure:
         mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_image_status="FAILED")
 
     @pytest.mark.asyncio
+    async def test_unusual_activity_is_not_retried_as_captcha(self):
+        """Google unusual-activity blocks must stop instead of entering the CAPTCHA retry loop."""
+        req = make_req(req_type="GENERATE_VIDEO", scene_id="scene-001", retry_count=0)
+        rid = req["id"]
+        result = {"error": "reCAPTCHA evaluation failed [PUBLIC_ERROR_UNUSUAL_ACTIVITY]"}
+
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(rid, req, result)
+
+        call_kwargs = mock_crud.update_request.call_args
+        assert call_kwargs[0][0] == rid
+        assert call_kwargs[1]["status"] == "FAILED"
+        assert "retry_count" not in call_kwargs[1]
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="FAILED")
+
+    @pytest.mark.asyncio
     async def test_extracts_error_message_from_nested_data(self):
         """Error message extraction from data.error.message should work."""
         req = make_req(retry_count=MAX_RETRIES - 1)

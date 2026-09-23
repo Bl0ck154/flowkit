@@ -33,6 +33,21 @@ FLOW_PROJECT_ID = os.environ.get("FLOW_PROJECT_ID", "")
 # both drop to plain i2v off the start frame. Upscale has no fallback.
 FLOW_ALLOW_DEGRADED = os.environ.get("FLOW_ALLOW_DEGRADED", "0") == "1"
 
+# Process-wide guard for every CAPTCHA-bearing generation submit, including
+# direct API calls that bypass the background worker's limiter.
+FLOW_GENERATION_MIN_INTERVAL_S = max(
+    0.0, float(os.environ.get("FLOW_GENERATION_MIN_INTERVAL_S", "3"))
+)
+FLOW_GENERATION_MAX_CONCURRENT = max(
+    1, int(os.environ.get("FLOW_GENERATION_MAX_CONCURRENT", "1"))
+)
+FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(
+    0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "120"))
+)
+FLOW_SESSION_PROJECT_IDLE_S = max(
+    300.0, float(os.environ.get("FLOW_SESSION_PROJECT_IDLE_S", "7200"))
+)
+
 # The tier no longer picks a model — aspect is its own slot and the model names
 # are fixed — so it is only carried for the DB column and the dashboard.
 DEFAULT_PAYGATE_TIER = os.environ.get("DEFAULT_PAYGATE_TIER", "PAYGATE_TIER_TWO")

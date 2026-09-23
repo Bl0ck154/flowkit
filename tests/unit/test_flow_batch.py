@@ -204,8 +204,35 @@ class TestVideoRequest:
         assert request[3] is None
         assert len(request[4]) == 6
         assert payload[1][5] == self.PID
-        assert payload[2][1] == 1
+        assert payload[2][1] == 2
         assert fb.CAPTCHA_SLOT in json.dumps(payload)
+
+    def test_text_video_360p_matches_current_ui_slots(self):
+        payload = inner(fb.text_video_request(
+            "a boat",
+            self.PID,
+            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            model="abra_t2v_4s",
+            resolution="360p",
+        ))
+        request = payload[0][0]
+        assert request[1] == "abra_t2v_4s_360p"
+        assert request[-1] == [4]
+        assert payload[2][1] == 2
+
+    def test_first_frame_default_crop_matches_current_ui(self):
+        payload = inner(fb.omni_first_frame_request(
+            "move gently",
+            self.PID,
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            duration_s=4,
+            resolution="360p",
+            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        ))
+        request = payload[0][0]
+        assert request[4][5] == [None, None, 1, 1]
+        assert request[-1] == [4]
+        assert payload[2][1] == 2
 
 
 class TestReaders:
