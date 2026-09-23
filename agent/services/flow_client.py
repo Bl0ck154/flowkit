@@ -624,9 +624,9 @@ class FlowClient:
     def _batch_project_id(self, project_id: str) -> str:
         """The Flow project an RPC is scoped to.
 
-        Flow Kit stores the Flow project uuid as the local project id, but a
-        few call sites pass "0" or "" for project-less work; those fall back to
-        the pinned FLOW_PROJECT_ID.
+        Flow Kit stores the Flow project uuid as the local project id. Public
+        direct endpoints resolve project-less work through the persistent
+        session-project lease before reaching this lower-level helper.
         """
         if project_id and self._UUID_RE.match(str(project_id)):
             resolved = str(project_id)
@@ -639,7 +639,8 @@ class FlowClient:
             return FLOW_PROJECT_ID
         raise fb.FlowBatchError(
             "NO_FLOW_PROJECT: every batchexecute call is scoped to a Flow project. "
-            "Create one in the Flow UI and pin its uuid as FLOW_PROJECT_ID."
+            "Pass a project id or use a public /api/flow endpoint so FlowKit can "
+            "resolve/create its session project."
         )
 
     def _batch_image_model(self, override: str | None = None) -> str:
@@ -1483,13 +1484,6 @@ class FlowClient:
 # the poller and the DB writers never learn which transport ran.
 
 _CAPTURE_HINT = "see docs/CAPTURE.md to record its payload off the new UI"
-
-_UNSUPPORTED_CREATE_PROJECT = (
-    "NO_FLOW_PROJECT: Flow's project.createProject endpoint went with the September 2026 "
-    "migration, so Flow Kit cannot create one. Make a project in the Flow UI, then either "
-    "pass its uuid as flow_project_id or pin it as FLOW_PROJECT_ID."
-)
-
 
 def _unsupported(feature: str, why: str) -> str:
     return f"UNSUPPORTED_ON_BATCH_API: {feature} — {why}; {_CAPTURE_HINT}."
