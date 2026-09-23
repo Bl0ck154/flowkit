@@ -269,10 +269,11 @@ async def _dismiss_blocking_overlays(cdp: _CDP) -> None:
     # server profile. DOM configuration clicks still work behind it, but a real
     # trusted mouse event correctly lands on the banner instead of Generate.
     # Accept only this known Flow/Google notice; do not blanket-click dialogs.
-    dismissed = await cdp.evaluate(
-        "(() => {const b=document.querySelector('.glue-cookie-notification-bar__accept'); if(!b || !b.offsetParent)return false; b.click(); return true})()"
+    visible = await cdp.evaluate(
+        "(() => {const b=document.querySelector('.glue-cookie-notification-bar__accept'); return !!b && !!b.offsetParent && !b.disabled})()"
     )
-    if dismissed:
+    if visible:
+        await cdp.trusted_click("document.querySelector('.glue-cookie-notification-bar__accept')")
         await asyncio.sleep(.25)
 
 
@@ -290,35 +291,44 @@ async def _wait_for_ui(cdp: _CDP, timeout: float = 15) -> None:
 
 
 async def _open_settings(cdp: _CDP) -> None:
-    await cdp.evaluate("(() => {document.querySelector('button.header-close-btn')?.click(); return true})()")
-    await asyncio.sleep(.15)
+    close_visible = await cdp.evaluate(
+        "(() => {const b=document.querySelector('button.header-close-btn'); return !!b && !!b.offsetParent && !b.disabled})()"
+    )
+    if close_visible:
+        await cdp.trusted_click("document.querySelector('button.header-close-btn')")
+        await asyncio.sleep(.15)
     # Only click when the settings panel is not already open.
     opened = await cdp.evaluate("(() => !![...document.querySelectorAll('button[role=\"radio\"]')].find(b=>b.querySelector('mat-icon')?.textContent.trim()==='image'))()")
     if not opened:
-        await cdp.evaluate("(() => {document.querySelector('button.settings-trigger-button')?.click(); return true})()")
+        await cdp.trusted_click("document.querySelector('button.settings-trigger-button')")
         await asyncio.sleep(.3)
 
 
 async def _click_radio_icon(cdp: _CDP, icon: str) -> None:
-    ok = await cdp.evaluate(
-        f"(() => {{const b=[...document.querySelectorAll('button[role=\"radio\"]')].find(x=>x.querySelector('mat-icon')?.textContent.trim()==={json.dumps(icon)}); if(!b)return false; if(b.getAttribute('aria-checked')!=='true')b.click(); return true;}})()"
+    expression = f"[...document.querySelectorAll('button[role=\"radio\"]')].find(x=>x.querySelector('mat-icon')?.textContent.trim()==={json.dumps(icon)})"
+    state = await cdp.evaluate(
+        f"(() => {{const b=({expression}); return b ? {{exists:true,checked:b.getAttribute('aria-checked')==='true'}} : {{exists:false,checked:false}};}})()"
     )
-    if not ok:
+    if not state or not state.get("exists"):
         raise RuntimeError(f"Flow UI radio icon not found: {icon}")
+    if not state.get("checked"):
+        await cdp.trusted_click(expression)
     await asyncio.sleep(.25)
 
 
 async def _click_radio_text(cdp: _CDP, prefix: str) -> None:
-    ok = await cdp.evaluate(
-        f"(() => {{const b=[...document.querySelectorAll('button[role=\"radio\"]')].find(x=>(x.innerText||'').trim().startsWith({json.dumps(prefix)})); if(!b)return false; if(b.getAttribute('aria-checked')!=='true')b.click(); return true;}})()"
+    expression = f"[...document.querySelectorAll('button[role=\"radio\"]')].find(x=>(x.innerText||'').trim().startsWith({json.dumps(prefix)}))"
+    state = await cdp.evaluate(
+        f"(() => {{const b=({expression}); return b ? {{exists:true,checked:b.getAttribute('aria-checked')==='true'}} : {{exists:false,checked:false}};}})()"
     )
-    if not ok:
+    if not state or not state.get("exists"):
         raise RuntimeError(f"Flow UI radio not found: {prefix}")
+    if not state.get("checked"):
+        await cdp.trusted_click(expression)
     await asyncio.sleep(.2)
 
 
 async def _select_model(cdp: _CDP, label: str) -> None:
-    current = await cdp.evaluate("(() => document.querySelector('button.settings-trigger-button')?.innerText || '')()")
     # The compact settings button does not always show the model; inspect the
     # model-family button inside the open settings panel as well.
     selected = await cdp.evaluate(
@@ -326,27 +336,47 @@ async def _select_model(cdp: _CDP, label: str) -> None:
     )
     if selected:
         return
-    opened = await cdp.evaluate(
-        "(() => {const b=[...document.querySelectorAll('button')].find(x=>x.querySelector('mat-icon')?.textContent.trim()==='arrow_drop_down' && /Nano Banana|Omni 1[.]1 Flash|Veo 3[.]1/.test(x.innerText||'')); if(!b)return false;b.click();return true})()"
-    )
-    if not opened:
+    selector_expr = "[...document.querySelectorAll('button')].find(x=>x.querySelector('mat-icon')?.textContent.trim()==='arrow_drop_down' && /Nano Banana|Omni 1[.]1 Flash|Veo 3[.]1/.test(x.innerText||''))"
+    selector_exists = await cdp.evaluate(f"!!({selector_expr})")
+    if not selector_exists:
         raise RuntimeError("Flow UI model selector not found")
+    await cdp.trusted_click(selector_expr)
     await asyncio.sleep(.25)
-    chosen = await cdp.evaluate(
-        f"(() => {{const i=[...document.querySelectorAll('[role=\"menuitem\"]')].find(x=>(x.innerText||'').includes({json.dumps(label)})); if(!i)return false;i.click();return true;}})()"
-    )
-    if not chosen:
+    item_expr = f"[...document.querySelectorAll('[role=\"menuitem\"]')].find(x=>(x.innerText||'').includes({json.dumps(label)}))"
+    item_exists = await cdp.evaluate(f"!!({item_expr})")
+    if not item_exists:
         raise RuntimeError(f"Flow UI model option not found: {label}")
+    await cdp.trusted_click(item_expr)
     await asyncio.sleep(.3)
 
 
 async def _set_prompt(cdp: _CDP, prompt: str) -> None:
-    ok = await cdp.evaluate(
-        f"(() => {{const e=[...document.querySelectorAll('[contenteditable=\"true\"]')].find(x=>x.offsetParent!==null); if(!e)return false; e.focus(); e.innerText={json.dumps(prompt)}; e.dispatchEvent(new InputEvent('input',{{bubbles:true,inputType:'insertText'}})); e.dispatchEvent(new Event('change',{{bubbles:true}})); return true;}})()"
-    )
-    if not ok:
+    editor_expr = "[...document.querySelectorAll('[contenteditable=\"true\"]')].find(x=>x.offsetParent!==null)"
+    exists = await cdp.evaluate(f"!!({editor_expr})")
+    if not exists:
         raise RuntimeError("Flow UI prompt editor not found")
+    await cdp.trusted_click(editor_expr)
+    await cdp.command("Input.dispatchKeyEvent", {
+        "type": "keyDown", "key": "a", "code": "KeyA",
+        "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "modifiers": 2,
+    })
+    await cdp.command("Input.dispatchKeyEvent", {
+        "type": "keyUp", "key": "a", "code": "KeyA",
+        "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "modifiers": 2,
+    })
+    await cdp.command("Input.dispatchKeyEvent", {
+        "type": "keyDown", "key": "Backspace", "code": "Backspace",
+        "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8,
+    })
+    await cdp.command("Input.dispatchKeyEvent", {
+        "type": "keyUp", "key": "Backspace", "code": "Backspace",
+        "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8,
+    })
+    await cdp.command("Input.insertText", {"text": prompt})
     await asyncio.sleep(.35)
+    current = await cdp.evaluate(f"(() => {{const e=({editor_expr}); return e ? (e.innerText||'').trim() : '';}})()")
+    if str(current or "").strip() != prompt.strip():
+        raise RuntimeError("Flow UI prompt editor did not accept trusted text input")
 
 
 async def _picker_asb_url(project_id: str, media_id: str) -> str | None:
@@ -455,20 +485,22 @@ async def _clear_selected_media(cdp: _CDP) -> None:
 
 async def _add_frame(cdp: _CDP, media_id: str, index: int, project_id: str) -> None:
     picker_url = await _picker_asb_url(project_id, media_id)
-    opened = await cdp.evaluate(
-        f"(() => {{const chips=[...document.querySelectorAll('button.empty-chip')]; const b=chips[{index}]; if(!b)return false;b.click();return true;}})()"
-    )
-    if not opened:
+    chip_expr = f"[...document.querySelectorAll('button.empty-chip')][{index}]"
+    exists = await cdp.evaluate(f"!!({chip_expr})")
+    if not exists:
         raise RuntimeError(f"Flow frame slot {index} is unavailable")
+    await cdp.trusted_click(chip_expr)
     await asyncio.sleep(.45)
     await _select_picker_media(cdp, media_id, picker_url)
 
 
 async def _add_ingredient(cdp: _CDP, media_id: str, project_id: str) -> None:
     picker_url = await _picker_asb_url(project_id, media_id)
-    opened = await cdp.evaluate("(() => {const b=document.querySelector('button.add-menu-trigger'); if(!b)return false;b.click();return true})()")
-    if not opened:
+    trigger_expr = "document.querySelector('button.add-menu-trigger')"
+    exists = await cdp.evaluate(f"!!({trigger_expr})")
+    if not exists:
         raise RuntimeError("Flow ingredients picker trigger is unavailable")
+    await cdp.trusted_click(trigger_expr)
     await asyncio.sleep(.45)
     await _select_picker_media(cdp, media_id, picker_url)
 
@@ -483,8 +515,8 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         await _click_radio_icon(cdp, _image_aspect_icon(spec.aspect))
         await _select_model(cdp, _IMAGE_MODEL_LABELS.get(spec.model, "Nano Banana 2"))
         await _click_radio_text(cdp, f"x{max(1, min(4, spec.count))}")
-        # Close settings by clicking its trigger before adding prompt ingredients.
-        await cdp.evaluate("(() => {document.querySelector('button.settings-trigger-button')?.click(); return true})()")
+        # Close settings through a trusted click before adding prompt ingredients.
+        await cdp.trusted_click("document.querySelector('button.settings-trigger-button')")
         await asyncio.sleep(.2)
         await _clear_selected_media(cdp)
         for mid in spec.reference_media_ids:
@@ -502,7 +534,7 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         if spec.duration_s:
             await _click_radio_text(cdp, str(spec.duration_s))
         await _click_radio_text(cdp, "x1")
-        await cdp.evaluate("(() => {document.querySelector('button.settings-trigger-button')?.click(); return true})()")
+        await cdp.trusted_click("document.querySelector('button.settings-trigger-button')")
         await asyncio.sleep(.25)
         await _clear_selected_media(cdp)
         if spec.kind in {"first_frame", "first_last"}:
