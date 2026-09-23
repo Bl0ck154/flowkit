@@ -671,24 +671,31 @@ class FlowClient:
     # ─── High-level API Methods ──────────────────────────────
 
     def flow_project_id(self, requested: str | None = None) -> str | None:
-        """The Flow project to attach a new Flow Kit project to, if any.
-
-        Project creation went with the labs.google tRPC endpoint the migration
-        unauthenticated, so on the batch path a project is made once in the
-        Flow UI and its uuid supplied here or pinned as FLOW_PROJECT_ID.
-        """
+        """Validate an explicitly requested Flow project id."""
         if requested and self._UUID_RE.match(requested):
             return requested
-        return FLOW_PROJECT_ID or None
+        return None
 
     async def create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
         if not USE_BATCH_RPC:
             return await self._legacy_create_project(project_title, tool_name)
-        pid = self.flow_project_id()
-        if not pid:
-            return {"error": _UNSUPPORTED_CREATE_PROJECT}
-        logger.info("Reusing pinned Flow project %s for '%s'", pid[:12], project_title)
-        return {"status": 200, "data": {"projectId": pid}}
+        try:
+            result = await self.batch_rpc(
+                fb.RPC_CREATE_PROJECT,
+                fb.create_project_request(project_title),
+                timeout=60,
+            )
+            if result.get("error"):
+                return {"status": result.get("status", 502), "error": result["error"]}
+            payload = fb.first_payload(result.get("data") or "", fb.RPC_CREATE_PROJECT)
+            pid, title = fb.read_created_project(payload)
+            if not self._UUID_RE.match(pid):
+                raise fb.FlowBatchError(f"invalid project id returned by Flow: {pid!r}")
+            self._batch_active_project = pid
+            logger.info("Flow project created: %s title=%r", pid, title or project_title)
+            return {"status": 200, "data": {"projectId": pid, "title": title or project_title}}
+        except Exception as exc:
+            return _batch_error(exc)
 
     async def generate_images(self, prompt: str, project_id: str,
                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",

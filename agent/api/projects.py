@@ -172,9 +172,10 @@ async def create(body: ProjectCreate):
 
     detected_tier = await _detect_user_tier(client)
 
-    # On the batch path Flow no longer creates projects for us — the uuid comes
-    # from the request or from FLOW_PROJECT_ID. The legacy path still mints one.
-    flow_project_id = client.flow_project_id(body.flow_project_id) if USE_BATCH_RPC else None
+    # Explicit flow_project_id means intentional reuse. Otherwise create a
+    # fresh real Flow project so unrelated jobs do not accumulate forever in
+    # one project listing.
+    flow_project_id = client.flow_project_id(body.flow_project_id) if body.flow_project_id else None
     if flow_project_id:
         logger.info("Flow project reused: %s", flow_project_id)
     else:

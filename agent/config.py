@@ -29,10 +29,15 @@ RECAPTCHA_SITE_KEY = os.environ.get("RECAPTCHA_SITE_KEY", "6LdsFiUsAAAAAIjVDZcuL
 # USE_BATCH_RPC=0 only to fall back to the dead REST path for a post-mortem.
 USE_BATCH_RPC = os.environ.get("USE_BATCH_RPC", "1") == "1"
 
-# The Flow project every RPC is scoped to. Project creation went with the old
-# labs.google tRPC endpoint, so a project is made once in the Flow UI and its
-# uuid pinned here; POST /api/projects falls back to it when no id is given.
+# Optional legacy fallback for callers that still supply no project id. New
+# code should either create a real Flow project or use the session-project
+# lease instead of pinning all work into one forever-growing project.
 FLOW_PROJECT_ID = os.environ.get("FLOW_PROJECT_ID", "")
+
+# Ad-hoc direct /api/flow calls without a project share a short-lived project.
+# The lease survives browser tab parking and agent restarts, but rotates after
+# this much generation/upload inactivity.
+FLOW_SESSION_PROJECT_IDLE_S = max(300.0, float(os.environ.get("FLOW_SESSION_PROJECT_IDLE_S", "7200")))
 
 # Capabilities whose payloads were never captured off the new UI (4K upscale,
 # reference-to-video, start+end-frame chaining) fail loudly by default. With

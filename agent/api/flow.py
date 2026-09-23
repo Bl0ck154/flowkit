@@ -17,6 +17,7 @@ from agent.services.browser_session import (
     inspect_google_account,
 )
 from agent.services.flow_credits import credit_response, estimate_video_generation_cost
+from agent.services.flow_project_session import current_session_project, ensure_session_project
 from agent.services.image_capabilities import image_capabilities
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -31,7 +32,7 @@ router = APIRouter(prefix="/flow", tags=["flow"])
 
 class GenerateImageRequest(BaseModel):
     prompt: str
-    project_id: str
+    project_id: str = ""
     aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
     image_model: Optional[str] = None
@@ -45,7 +46,7 @@ class GenerateImageRequest(BaseModel):
 class GenerateVideoRequest(BaseModel):
     start_image_media_id: str
     prompt: str
-    project_id: str
+    project_id: str = ""
     scene_id: str
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     end_image_media_id: Optional[str] = None
@@ -59,7 +60,7 @@ class GenerateVideoRequest(BaseModel):
 class GenerateVideoRefsRequest(BaseModel):
     reference_media_ids: list[str]
     prompt: str
-    project_id: str
+    project_id: str = ""
     scene_id: str
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
@@ -73,7 +74,7 @@ class GenerateVideoRefsRequest(BaseModel):
 class GenerateOmniFlashVideoRequest(BaseModel):
     reference_media_ids: list[str]
     prompt: str
-    project_id: str
+    project_id: str = ""
     scene_id: str = ""
     duration_s: int = 8
     resolution: Literal["360p", "720p"] = "720p"
@@ -83,7 +84,7 @@ class GenerateOmniFlashVideoRequest(BaseModel):
 
 class GenerateOmniFlashTextVideoRequest(BaseModel):
     prompt: str
-    project_id: str
+    project_id: str = ""
     scene_id: str = ""
     duration_s: int = 8
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
@@ -147,6 +148,21 @@ def _attach_credit_estimate(data: object, snapshot: dict, cost: int | None):
     return data
 
 
+async def _resolve_direct_project(client, project_id: str) -> str:
+    """Use an explicit project, otherwise reuse/create the 2h ad-hoc session project."""
+    pid = str(project_id or "").strip()
+    if pid:
+        return pid
+    try:
+        session = await ensure_session_project(client)
+    except Exception as exc:
+        raise HTTPException(502, f"Could not create Flow session project: {exc}") from exc
+    pid = str(session.get("project_id") or "")
+    if not pid:
+        raise HTTPException(502, "Flow session project did not return an id")
+    return pid
+
+
 @router.get("/status")
 async def extension_status():
     """Report transport state and the real signed-in Flow browser session."""
@@ -170,6 +186,7 @@ async def extension_status():
             "max_concurrent": FLOW_GENERATION_MAX_CONCURRENT,
             "unusual_activity_cooldown_s": FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
         },
+        "session_project": current_session_project(),
     }
 
 
@@ -224,7 +241,9 @@ async def generate_image(body: GenerateImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     data = body.model_dump(exclude={"reference_media_ids"})
+    data["project_id"] = project_id
     refs = list(dict.fromkeys((body.reference_media_ids or []) + (body.character_media_ids or [])))
     data["character_media_ids"] = refs or None
     result = await client.generate_images(**data)
@@ -248,6 +267,7 @@ async def generate_video(body: GenerateVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
@@ -255,7 +275,7 @@ async def generate_video(body: GenerateVideoRequest):
             common = dict(
                 start_image_media_id=body.start_image_media_id,
                 prompt=body.prompt,
-                project_id=body.project_id,
+                project_id=project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
                 resolution=body.resolution,
@@ -272,9 +292,11 @@ async def generate_video(body: GenerateVideoRequest):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
-        result = await client.generate_video(
-            **body.model_dump(exclude={"model_family", "duration_s", "resolution"}, exclude_none=True)
+        payload = body.model_dump(
+            exclude={"model_family", "duration_s", "resolution"}, exclude_none=True
         )
+        payload["project_id"] = project_id
+        result = await client.generate_video(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -308,6 +330,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
@@ -315,7 +338,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
             result = await generate_omni_flash_video(
                 reference_media_ids=body.reference_media_ids,
                 prompt=body.prompt,
-                project_id=body.project_id,
+                project_id=project_id,
                 scene_id=body.scene_id,
                 duration_s=body.duration_s,
                 resolution=body.resolution,
@@ -325,9 +348,9 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
-        result = await client.generate_video_from_references(
-            **body.model_dump(exclude={"model_family", "duration_s", "resolution"})
-        )
+        payload = body.model_dump(exclude={"model_family", "duration_s", "resolution"})
+        payload["project_id"] = project_id
+        result = await client.generate_video_from_references(**payload)
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
@@ -357,9 +380,12 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     credit_snapshot = await inspect_flow_credits()
     try:
-        result = await generate_omni_flash_text_video(**body.model_dump())
+        payload = body.model_dump()
+        payload["project_id"] = project_id
+        result = await generate_omni_flash_text_video(**payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if result.get("error") or (
@@ -389,9 +415,12 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     credit_snapshot = await inspect_flow_credits()
     try:
-        result = await generate_omni_flash_video(**body.model_dump())
+        payload = body.model_dump()
+        payload["project_id"] = project_id
+        result = await generate_omni_flash_video(**payload)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
@@ -563,6 +592,7 @@ async def upload_image(body: UploadImageRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    project_id = await _resolve_direct_project(client, body.project_id)
     if body.image_base64:
         try:
             image_bytes = base64.b64decode(body.image_base64, validate=True)
@@ -581,8 +611,8 @@ async def upload_image(body: UploadImageRequest):
     else:
         raise HTTPException(422, "file_path or image_base64 is required")
     b64 = base64.b64encode(image_bytes).decode()
-    result = await client.upload_image(b64, mime_type=mime, project_id=body.project_id, file_name=body.file_name)
+    result = await client.upload_image(b64, mime_type=mime, project_id=project_id, file_name=body.file_name)
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
     media_id = result.get("_mediaId")
-    return {"media_id": media_id, "raw": result.get("data", result)}
+    return {"media_id": media_id, "project_id": project_id, "raw": result.get("data", result)}
