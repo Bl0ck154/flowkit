@@ -348,38 +348,61 @@ async def _select_picker_media(cdp: _CDP, media_id: str) -> None:
     escaped = json.dumps(str(media_id))
     # The picker is a CDK virtual scroll: old project assets may not exist in
     # the DOM until their row is scrolled into view. Walk the viewport instead
-    # of assuming the desired media is among the first visible items.
-    ok = await cdp.evaluate(
+    # of assuming the desired media is among the first visible items. Uploaded
+    # assets normally expose /image/<media_id>; generated images can instead be
+    # represented by the same opaque /asb/<token> in the grid and picker.
+    found = await cdp.evaluate(
         f"""(async () => {{
           const wanted={escaped};
           const viewport=document.querySelector('.asset-list-viewport');
+          const grid=[...document.querySelectorAll('[data-media-id]')].find(e=>e.getAttribute('data-media-id')===wanted);
+          const gridSrc=grid?.src||'';
+          const asbRaw=gridSrc.includes('/asb/') ? gridSrc.split('/asb/')[1].split(/[?#]/)[0] : '';
+          const asbToken=asbRaw.replace(/=s[0-9].*$/, '');
+          const matches=(src)=>{{
+            src=src||'';
+            return src.includes('/image/'+wanted) || (asbToken && src.includes('/asb/'+asbToken));
+          }};
           const find=()=>[...document.querySelectorAll('button.asset-item')].find(
-            b=>[...b.querySelectorAll('img')].some(i=>(i.src||'').includes('/image/'+wanted))
+            b=>[...b.querySelectorAll('img')].some(i=>matches(i.src))
           );
           let item=find();
-          if(item){{item.click();return true;}}
-          if(!viewport)return false;
+          if(item)return {{found:true,asbToken}};
+          if(!viewport)return {{found:false,asbToken}};
           viewport.scrollTop=0; viewport.dispatchEvent(new Event('scroll',{{bubbles:true}}));
           await new Promise(r=>setTimeout(r,120));
           for(let n=0;n<80;n++){{
-            item=find(); if(item){{item.click();return true;}}
+            item=find(); if(item)return {{found:true,asbToken}};
             const before=viewport.scrollTop;
             viewport.scrollTop=Math.min(viewport.scrollHeight, before+Math.max(240,viewport.clientHeight*.8));
             viewport.dispatchEvent(new Event('scroll',{{bubbles:true}}));
             await new Promise(r=>setTimeout(r,120));
             if(viewport.scrollTop===before && viewport.scrollTop+viewport.clientHeight>=viewport.scrollHeight-2)break;
           }}
-          item=find(); if(item){{item.click();return true;}}
-          return false;
+          return {{found:!!find(),asbToken}};
         }})()"""
     )
-    if not ok:
+    if not isinstance(found, dict) or not found.get("found"):
         raise RuntimeError(f"Flow media {media_id} was not found in the project picker")
-    await asyncio.sleep(.25)
-    added = await cdp.evaluate("(() => {const b=document.querySelector('.detail-add-to-prompt-btn'); if(!b || b.disabled)return false;b.click();return true})()")
-    if not added:
-        raise RuntimeError("Flow media picker add button is unavailable")
-    await asyncio.sleep(.45)
+
+    asb_token = json.dumps(str(found.get("asbToken") or ""))
+    item_expr = f"""(() => {{
+      const wanted={escaped}, asbToken={asb_token};
+      const matches=(src)=>{{src=src||'';return src.includes('/image/'+wanted)||(asbToken&&src.includes('/asb/'+asbToken));}};
+      return [...document.querySelectorAll('button.asset-item')].find(b=>[...b.querySelectorAll('img')].some(i=>matches(i.src)));
+    }})()"""
+    await cdp.trusted_click(item_expr)
+    await asyncio.sleep(.35)
+
+    # Frame selection closes the picker immediately. Ingredient/reference
+    # pickers may remain open and expose an explicit "add to prompt" button.
+    picker_open = await cdp.evaluate("(() => !!document.querySelector('.asset-list-viewport'))()")
+    if picker_open:
+        confirm = await cdp.evaluate("(() => {const b=document.querySelector('.detail-add-to-prompt-btn'); return !!b && !b.disabled && !!b.offsetParent})()")
+        if not confirm:
+            raise RuntimeError("Flow media picker did not accept the selected asset")
+        await cdp.trusted_click("document.querySelector('.detail-add-to-prompt-btn')")
+        await asyncio.sleep(.45)
 
 
 async def _add_frame(cdp: _CDP, media_id: str, index: int) -> None:
