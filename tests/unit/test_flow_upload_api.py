@@ -204,3 +204,21 @@ async def test_multipart_route_parses_real_form_data(monkeypatch):
     assert client.uploads[0]["bytes"] == IMAGE
     assert client.uploads[0]["file_name"] == "browser.png"
     assert client.uploads[0]["mime_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_successful_upload_marks_media_for_ui_refresh(monkeypatch):
+    client = FakeFlowClient()
+    marks = []
+    monkeypatch.setattr(flow_api, "mark_uploaded_media_for_ui_refresh", lambda project_id, media_id: marks.append((project_id, media_id)))
+
+    result = await flow_api._upload_image_bytes(
+        client,
+        IMAGE,
+        project_id=PROJECT,
+        mime_type="image/png",
+        file_name="fresh.png",
+    )
+
+    assert result["media_id"] == MEDIA
+    assert marks == [(PROJECT, MEDIA)]

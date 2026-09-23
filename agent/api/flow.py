@@ -22,6 +22,7 @@ from agent.services.browser_session import (
 from agent.services.flow_credits import credit_response, estimate_video_generation_cost
 from agent.services.flow_payload_drift import payload_drift_status
 from agent.services.flow_project_session import current_session_project, ensure_session_project
+from agent.services.flow_ui_generation import mark_uploaded_media_for_ui_refresh
 from agent.services.image_capabilities import image_capabilities
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -638,6 +639,8 @@ async def _upload_image_bytes(
             result.get("error", result.get("data")),
         )
     media_id = result.get("_mediaId")
+    if media_id:
+        mark_uploaded_media_for_ui_refresh(resolved_project_id, media_id)
     return {
         "media_id": media_id,
         "project_id": resolved_project_id,

@@ -166,3 +166,32 @@ async def test_configure_ui_reloads_once_when_picker_cache_is_stale(monkeypatch)
 
     assert attempts == 2
     assert calls == [("Page.reload", {"ignoreCache": True}), ("wait-ui", {})]
+
+
+def test_fresh_upload_marker_is_consumed_only_for_referenced_media():
+    from agent.services import flow_ui_generation as ui
+
+    ui._fresh_uploaded_media.clear()
+    ui.mark_uploaded_media_for_ui_refresh(PROJECT, START)
+    other = ui.UIGenerationSpec(
+        rpcid=fb.RPC_GEN_VIDEO,
+        project_id=PROJECT,
+        kind="first_frame",
+        prompt="x",
+        aspect=fb.VIDEO_ASPECT_LANDSCAPE,
+        model="abra_i2v_10s",
+        start_media_id=END,
+    )
+    wanted = ui.UIGenerationSpec(
+        rpcid=fb.RPC_GEN_VIDEO,
+        project_id=PROJECT,
+        kind="first_frame",
+        prompt="x",
+        aspect=fb.VIDEO_ASPECT_LANDSCAPE,
+        model="abra_i2v_10s",
+        start_media_id=START,
+    )
+
+    assert ui._consume_fresh_media_refresh(other) is False
+    assert ui._consume_fresh_media_refresh(wanted) is True
+    assert ui._consume_fresh_media_refresh(wanted) is False

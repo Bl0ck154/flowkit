@@ -31,6 +31,41 @@ from agent.services.flow_payload_drift import compare_and_record
 
 logger = logging.getLogger(__name__)
 
+# API uploads update Flow's backend before the already-open Angular project page
+# refreshes its asset list. Track those ids so the next UI generation can reload
+# the project once *before* touching composer controls.
+_fresh_uploaded_media: dict[str, set[str]] = {}
+
+
+def mark_uploaded_media_for_ui_refresh(project_id: str, media_id: str) -> None:
+    if project_id and media_id:
+        _fresh_uploaded_media.setdefault(str(project_id), set()).add(str(media_id))
+
+
+def _spec_media_ids(spec: "UIGenerationSpec") -> set[str]:
+    values = {
+        str(value)
+        for value in (spec.start_media_id, spec.end_media_id, spec.base_media_id)
+        if value
+    }
+    values.update(str(value) for value in spec.reference_media_ids if value)
+    return values
+
+
+def _consume_fresh_media_refresh(spec: "UIGenerationSpec") -> bool:
+    project_id = str(spec.project_id or "")
+    pending = _fresh_uploaded_media.get(project_id)
+    if not pending:
+        return False
+    referenced = _spec_media_ids(spec)
+    matched = pending.intersection(referenced)
+    if not matched:
+        return False
+    pending.difference_update(matched)
+    if not pending:
+        _fresh_uploaded_media.pop(project_id, None)
+    return True
+
 
 class PickerMediaNotFound(RuntimeError):
     """The backend media exists but the current Flow picker cache cannot see it."""
@@ -648,8 +683,16 @@ async def run_flow_ui_generation(rpcid: str, freq: str, *, project_id: str | Non
             cdp = _CDP(ws)
             await cdp.command("Network.enable", {"maxPostDataSize": 8 * 1024 * 1024})
             current = await cdp.evaluate("location.href")
+            fresh_media_refresh = _consume_fresh_media_refresh(spec)
             if f"/project/{pid}" not in str(current):
                 await cdp.command("Page.navigate", {"url": f"https://flow.google.com/project/{pid}"})
+                await asyncio.sleep(2)
+            elif fresh_media_refresh:
+                logger.info(
+                    "Fresh API-uploaded media referenced by generation; refreshing project UI before composer setup project=%s",
+                    pid,
+                )
+                await cdp.command("Page.reload", {"ignoreCache": True})
                 await asyncio.sleep(2)
             await _wait_for_ui(cdp)
             await _configure_ui(cdp, spec)
