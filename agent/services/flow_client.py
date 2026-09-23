@@ -32,7 +32,7 @@ from agent.config import (
 from agent import config as _config
 from agent.services import flow_batch as fb
 from agent.services.browser_session import inspect_flow_session, inspect_flow_credits, run_flow_batch_rpc
-from agent.services.flow_ui_generation import run_flow_ui_generation
+from agent.services.flow_playwright_generation import run_flow_playwright_generation as run_flow_ui_generation
 from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
