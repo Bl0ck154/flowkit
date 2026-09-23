@@ -346,11 +346,35 @@ async def _set_prompt(cdp: _CDP, prompt: str) -> None:
 
 async def _select_picker_media(cdp: _CDP, media_id: str) -> None:
     escaped = json.dumps(str(media_id))
+    # The picker is a CDK virtual scroll: old project assets may not exist in
+    # the DOM until their row is scrolled into view. Walk the viewport instead
+    # of assuming the desired media is among the first visible items.
     ok = await cdp.evaluate(
-        f"(() => {{const item=[...document.querySelectorAll('button.asset-item')].find(b=>[...b.querySelectorAll('img')].some(i=>(i.src||'').includes('/image/'+{escaped}))); if(!item)return false; item.click(); return true;}})()"
+        f"""(async () => {{
+          const wanted={escaped};
+          const viewport=document.querySelector('.asset-list-viewport');
+          const find=()=>[...document.querySelectorAll('button.asset-item')].find(
+            b=>[...b.querySelectorAll('img')].some(i=>(i.src||'').includes('/image/'+wanted))
+          );
+          let item=find();
+          if(item){{item.click();return true;}}
+          if(!viewport)return false;
+          viewport.scrollTop=0; viewport.dispatchEvent(new Event('scroll',{{bubbles:true}}));
+          await new Promise(r=>setTimeout(r,120));
+          for(let n=0;n<80;n++){{
+            item=find(); if(item){{item.click();return true;}}
+            const before=viewport.scrollTop;
+            viewport.scrollTop=Math.min(viewport.scrollHeight, before+Math.max(240,viewport.clientHeight*.8));
+            viewport.dispatchEvent(new Event('scroll',{{bubbles:true}}));
+            await new Promise(r=>setTimeout(r,120));
+            if(viewport.scrollTop===before && viewport.scrollTop+viewport.clientHeight>=viewport.scrollHeight-2)break;
+          }}
+          item=find(); if(item){{item.click();return true;}}
+          return false;
+        }})()"""
     )
     if not ok:
-        raise RuntimeError(f"Flow media {media_id} is not visible in the project picker")
+        raise RuntimeError(f"Flow media {media_id} was not found in the project picker")
     await asyncio.sleep(.25)
     added = await cdp.evaluate("(() => {const b=document.querySelector('.detail-add-to-prompt-btn'); if(!b || b.disabled)return false;b.click();return true})()")
     if not added:
