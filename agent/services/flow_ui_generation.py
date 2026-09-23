@@ -25,6 +25,7 @@ import websockets
 
 from agent.services import browser_session as bs
 from agent.services import flow_batch as fb
+from agent.services.flow_payload_drift import compare_and_record
 
 
 @dataclass
@@ -489,11 +490,12 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
     await _set_prompt(cdp, spec.prompt)
 
 
-async def _response_body_for_rpc(cdp: _CDP, rpcid: str, timeout: float) -> tuple[int, str]:
+async def _response_body_for_rpc(cdp: _CDP, rpcid: str, timeout: float) -> tuple[int, str, str]:
     started = time.monotonic()
     deadline = started + timeout
     submit_deadline = min(deadline, started + 15.0)
     request_id: str | None = None
+    request_post_data = ""
     status = 200
     while time.monotonic() < deadline:
         if request_id is None and time.monotonic() >= submit_deadline:
@@ -511,13 +513,14 @@ async def _response_body_for_rpc(cdp: _CDP, rpcid: str, timeout: float) -> tuple
             req = params.get("request", {})
             if rpcid in req.get("postData", "") and "batchexecute" in req.get("url", ""):
                 request_id = params.get("requestId")
+                request_post_data = str(req.get("postData") or "")
         elif request_id and params.get("requestId") == request_id and method == "Network.responseReceived":
             status = int(params.get("response", {}).get("status") or 200)
         elif request_id and params.get("requestId") == request_id and method == "Network.loadingFinished":
             body = await cdp.command("Network.getResponseBody", {"requestId": request_id}, timeout=10)
             result = body.get("result", {})
             text = result.get("body", "")
-            return status, text
+            return status, text, request_post_data
     raise TimeoutError(f"Flow UI did not submit/finish RPC {rpcid} within {timeout}s")
 
 
@@ -567,8 +570,9 @@ async def run_flow_ui_generation(rpcid: str, freq: str, *, project_id: str | Non
             # extension_hijack_detected and rejects the otherwise-valid RPC.
             await _dismiss_blocking_overlays(cdp)
             await cdp.trusted_click("[...document.querySelectorAll('button')].find(b=>b.classList.contains('generate-icon-button'))")
-            status, body = await _response_body_for_rpc(cdp, rpcid, timeout)
-            return {"status": status, "data": body}
+            status, body, post_data = await _response_body_for_rpc(cdp, rpcid, timeout)
+            drift = compare_and_record(rpcid, freq, post_data, spec=spec)
+            return {"status": status, "data": body, "payload_drift": drift}
     except Exception as exc:
         return {"error": f"UI_GENERATION_FAILED: {exc}"}
     finally:

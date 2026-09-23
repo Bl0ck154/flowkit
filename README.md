@@ -308,14 +308,16 @@ This is **not** intended to erase or replace upstream credit. If you need the or
 
 Current upstream compatibility work is also submitted back through pull requests where practical.
 
-## Roadmap
+## Automatic compatibility monitoring
 
-Near-term maintenance work:
+Every normal trusted-UI generation now doubles as a **zero-extra-credit compatibility check**. FlowKit captures the actual `f.req` sent by the current Flow UI, strips prompts, media/project IDs, UUIDs, reCAPTCHA/opaque values and random seeds, then compares the remaining structure with the request builder that initiated the job.
 
-- automatic detection of Flow request-schema drift;
-- UI fallback when a direct generation payload is temporarily stale;
-- sanitized comparison of live UI requests against FlowKit builders;
-- automated regression-test / patch branches for simple wire-format changes;
+`GET /api/flow/status` exposes the latest sanitized `payload_drift` state. Structural changes such as a moved crop slot, changed client descriptor or new resolution flag are logged as `PAYLOAD_DRIFT` without storing the sensitive request payload.
+
+Near-term roadmap:
+
+- automated regression-test / patch branches for simple, whitelisted wire-format changes;
+- optional GitHub PR creation when a safe structural patch is inferred and the full suite passes;
 - safer periodic upstream syncs without overwriting fork-specific server features.
 
 The goal is to turn a future Flow frontend change from “the API is broken” into “FlowKit detected payload drift and has a tested compatibility patch ready.”

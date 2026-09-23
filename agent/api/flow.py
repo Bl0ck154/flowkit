@@ -17,6 +17,7 @@ from agent.services.browser_session import (
     inspect_google_account,
 )
 from agent.services.flow_credits import credit_response, estimate_video_generation_cost
+from agent.services.flow_payload_drift import payload_drift_status
 from agent.services.flow_project_session import current_session_project, ensure_session_project
 from agent.services.image_capabilities import image_capabilities
 from agent.services.omni_flash import (
@@ -189,6 +190,7 @@ async def extension_status():
             **client.generation_guard_status,
         },
         "session_project": current_session_project(),
+        "payload_drift": payload_drift_status(),
     }
 
 
