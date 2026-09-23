@@ -405,6 +405,25 @@ async def _select_picker_media(cdp: _CDP, media_id: str) -> None:
         await asyncio.sleep(.45)
 
 
+async def _clear_selected_media(cdp: _CDP) -> None:
+    """Reset media chips left in Flow's composer by an earlier generation."""
+    for _ in range(10):
+        count = await cdp.evaluate(
+            "(() => [...document.querySelectorAll('button.chip-container')].filter(b=>b.offsetParent).length)()"
+        )
+        if not count:
+            return
+        await cdp.trusted_click(
+            "[...document.querySelectorAll('button.chip-container')].find(b=>b.offsetParent)?.querySelector('.hover-icon-overlay')"
+        )
+        await asyncio.sleep(.2)
+    remaining = await cdp.evaluate(
+        "(() => [...document.querySelectorAll('button.chip-container')].filter(b=>b.offsetParent).length)()"
+    )
+    if remaining:
+        raise RuntimeError("Flow composer media chips could not be reset")
+
+
 async def _add_frame(cdp: _CDP, media_id: str, index: int) -> None:
     opened = await cdp.evaluate(
         f"(() => {{const chips=[...document.querySelectorAll('button.empty-chip')]; const b=chips[{index}]; if(!b)return false;b.click();return true;}})()"
@@ -436,6 +455,7 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         # Close settings by clicking its trigger before adding prompt ingredients.
         await cdp.evaluate("(() => {document.querySelector('button.settings-trigger-button')?.click(); return true})()")
         await asyncio.sleep(.2)
+        await _clear_selected_media(cdp)
         for mid in spec.reference_media_ids:
             await _add_ingredient(cdp, mid)
     else:
@@ -453,6 +473,7 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         await _click_radio_text(cdp, "x1")
         await cdp.evaluate("(() => {document.querySelector('button.settings-trigger-button')?.click(); return true})()")
         await asyncio.sleep(.25)
+        await _clear_selected_media(cdp)
         if spec.kind in {"first_frame", "first_last"}:
             if not spec.start_media_id:
                 raise RuntimeError("first-frame generation is missing start media")
