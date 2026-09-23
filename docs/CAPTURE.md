@@ -75,3 +75,12 @@ field name.
 **Slots do not share encodings.** Image aspect is 1 square / 2 portrait /
 3 landscape / 4 is 3:4 / 5 is 4:3. Video aspect is 1 portrait / 2 landscape, in
 its own slot. Conflating them renders the wrong shape silently.
+
+## 2026-09-23 UI refresh notes
+
+A live `flow.google.com` capture showed two migrated Omni video details had changed from older fixtures:
+
+- default first-frame crop is now `[null, null, 1, 1]` when the user has not reframed the source;
+- text-to-video 360p uses the `*_360p` model key, appends the low-resolution `[4]` option slot, and uses client descriptor type `2`.
+
+The same capture verified current first-frame `eb1hJf` structure and was followed by a successful direct FlowKit submit using that shape. Keep the golden fixtures aligned with these live-captured slots; do not restore the older near-edge crop or text-video descriptor `1` without a newer UI capture.
