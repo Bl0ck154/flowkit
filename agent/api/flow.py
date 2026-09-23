@@ -3,9 +3,13 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
-from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED
+from agent.config import (
+    USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
+    FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+)
 from agent.services.flow_client import get_flow_client
-from agent.services.browser_session import ensure_flow_session, inspect_flow_session
+from agent.services.browser_session import ensure_flow_session, inspect_flow_session, inspect_google_account
 from agent.services.image_capabilities import image_capabilities
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -147,6 +151,11 @@ async def extension_status():
         "session_url": session.get("url"),
         "flow_key_present": client._flow_key is not None,
         "legacy_flow_key_authoritative": not USE_BATCH_RPC,
+        "generation_throttle": {
+            "min_interval_s": FLOW_GENERATION_MIN_INTERVAL_S,
+            "max_concurrent": FLOW_GENERATION_MAX_CONCURRENT,
+            "unusual_activity_cooldown_s": FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+        },
     }
 
 
@@ -166,6 +175,15 @@ async def ensure_session():
         "session_url": session.get("url"),
         "interactive_login_required": session.get("state") == "INTERACTIVE_LOGIN_REQUIRED",
     }
+
+
+@router.get("/account")
+async def get_account():
+    """Return the signed-in Flow Google account name/email, never auth secrets."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    return await inspect_google_account()
 
 
 @router.get("/credits")

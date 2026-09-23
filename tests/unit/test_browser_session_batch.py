@@ -105,3 +105,55 @@ async def test_ensure_session_parks_flow_after_idle_delay(monkeypatch):
         await asyncio.wait_for(parked.wait(), timeout=0.2)
     finally:
         bs._cancel_flow_tab_idle_close()
+
+
+def test_account_name_from_google_label():
+    assert bs._account_name_from_label(
+        "Google Account: John Doe (john@example.com)", "john@example.com"
+    ) == "John Doe"
+    assert bs._account_name_from_label(
+        "Обліковий запис Google: Slavko (slavko@example.com), Платна підписка Google",
+        "slavko@example.com",
+    ) == "Slavko"
+
+
+def test_account_from_profile_preferences(tmp_path, monkeypatch):
+    profile = tmp_path / "Default"
+    profile.mkdir()
+    (profile / "Preferences").write_text(
+        '{"account_info":[{"email":"john@example.com","full_name":"John Doe","gaia":"123"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bs, "CHROME_PROFILE_DIR", tmp_path)
+    result = bs._account_from_profile_preferences()
+    assert result == {
+        "email": "john@example.com",
+        "name": "John Doe",
+        "source": "chrome_profile",
+        "profile": "Default",
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_google_account_prefers_live_flow_label(monkeypatch):
+    async def fake_ensure(wait_s=2.0):
+        return {"signedIn": True, "state": "AUTHENTICATED"}
+
+    async def fake_targets():
+        return [{
+            "type": "page",
+            "url": "https://flow.google.com/",
+            "webSocketDebuggerUrl": "ws://flow-account-test",
+        }]
+
+    async def fake_evaluate(ws_url, expression, timeout=8):
+        return ["Google Account: John Doe (john@example.com)"]
+
+    monkeypatch.setattr(bs, "ensure_flow_session", fake_ensure)
+    monkeypatch.setattr(bs, "_targets", fake_targets)
+    monkeypatch.setattr(bs, "_evaluate", fake_evaluate)
+    result = await bs.inspect_google_account()
+    assert result["authenticated"] is True
+    assert result["email"] == "john@example.com"
+    assert result["name"] == "John Doe"
+    assert result["source"] == "flow_page"

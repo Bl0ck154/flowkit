@@ -26,6 +26,8 @@ from agent.config import (
     VIDEO_MODELS, UPSCALE_MODELS, IMAGE_MODELS, VIDEO_POLL_TIMEOUT,
     USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
+    FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
@@ -69,6 +71,12 @@ class FlowClient:
         # Last project resolved for a batchexecute request. The direct-CDP
         # runner uses it to keep Chrome on the matching Flow project page.
         self._batch_active_project: Optional[str] = None
+        # Global generation throttle. Unlike the worker limiter, this also
+        # covers direct API calls and other integrations that share FlowClient.
+        self._generation_slots = asyncio.Semaphore(FLOW_GENERATION_MAX_CONCURRENT)
+        self._generation_rate_gate = asyncio.Lock()
+        self._generation_last_submit_at = 0.0
+        self._generation_unusual_until = 0.0
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -536,14 +544,73 @@ class FlowClient:
         # the new transport independent of which MV3 package version Chrome
         # currently has installed; the extension remains responsible for the
         # legacy bridge and telemetry, while cookies/CSRF/reCAPTCHA stay in-page.
-        return await run_flow_batch_rpc(
-            rpcid,
-            freq,
-            captcha_action=captcha_action,
-            match=match,
-            project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
-            timeout=timeout,
-        )
+        is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
+        if not is_generation:
+            return await run_flow_batch_rpc(
+                rpcid,
+                freq,
+                captcha_action=captcha_action,
+                match=match,
+                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                timeout=timeout,
+            )
+
+        now = time.monotonic()
+        if now < self._generation_unusual_until:
+            remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+            return {
+                "status": 429,
+                "error": (
+                    "PUBLIC_ERROR_UNUSUAL_ACTIVITY local cooldown active; "
+                    f"retry in about {remaining}s"
+                ),
+            }
+
+        await self._generation_slots.acquire()
+        try:
+            # Serialize the launch gate even if the configured concurrency is
+            # raised later. This spaces CAPTCHA mints / generation dispatches
+            # while still allowing already-submitted backend jobs to run.
+            async with self._generation_rate_gate:
+                now = time.monotonic()
+                if now < self._generation_unusual_until:
+                    remaining = max(1, int(self._generation_unusual_until - now + 0.999))
+                    return {
+                        "status": 429,
+                        "error": (
+                            "PUBLIC_ERROR_UNUSUAL_ACTIVITY local cooldown active; "
+                            f"retry in about {remaining}s"
+                        ),
+                    }
+                delay = FLOW_GENERATION_MIN_INTERVAL_S - (now - self._generation_last_submit_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._generation_last_submit_at = time.monotonic()
+
+            result = await run_flow_batch_rpc(
+                rpcid,
+                freq,
+                captcha_action=captcha_action,
+                match=match,
+                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                timeout=timeout,
+            )
+            blob = f"{result.get('error', '')} {result.get('data', '')}"
+            if (
+                "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in blob
+                or "unusual activity" in blob.lower()
+            ):
+                self._generation_unusual_until = max(
+                    self._generation_unusual_until,
+                    time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+                )
+                logger.warning(
+                    "Google unusual-activity block detected; pausing generation submits for %.0fs",
+                    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+                )
+            return result
+        finally:
+            self._generation_slots.release()
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,

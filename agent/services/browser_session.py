@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 
 import websockets
 
 CDP_BASE = os.environ.get("FLOW_CHROME_CDP", "http://127.0.0.1:9224")
 FLOW_URL = "https://flow.google.com/"
 _FLOW_PREFIXES = ("https://flow.google.com/", "https://labs.google/fx/")
+CHROME_PROFILE_DIR = Path(os.environ.get("FLOW_CHROME_PROFILE_DIR", "/var/lib/flowkit/browser-profile"))
+_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 try:
     FLOW_TAB_IDLE_CLOSE_S = max(0.0, float(os.environ.get("FLOW_TAB_IDLE_CLOSE_S", "0")))
 except ValueError:
@@ -164,6 +168,144 @@ async def _navigate(ws_url: str, url: str) -> None:
             payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             if payload.get("id") == request_id:
                 return
+
+
+def _account_name_from_label(label: str, email: str) -> str | None:
+    raw = str(label or "").strip()
+    prefix = r"(?:google\s+account|account|обліковий\s+запис\s+google|акаунт\s+google)"
+    # Google commonly exposes the avatar as e.g.
+    # "Google Account: Name (mail@example.com), Paid Google subscription".
+    # Capture only the display name before the parenthesized email so plan/status
+    # suffixes do not become part of the account name.
+    match = re.search(
+        rf"^(?:{prefix})\s*[:,-]?\s*(.*?)\s*\(\s*{re.escape(email)}\s*\)",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+
+    text = raw.replace(email, " ")
+    text = re.sub(r"[()<>]", " ", text)
+    text = re.sub(rf"^(?:{prefix})\s*[:,-]?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" :-,")
+    return text or None
+
+
+def _account_from_profile_preferences() -> dict | None:
+    """Read only account display metadata from Chrome Preferences."""
+    candidates: list[tuple[int, str, str | None, str]] = []
+    if not CHROME_PROFILE_DIR.exists():
+        return None
+    profiles = [CHROME_PROFILE_DIR / "Default"] + sorted(CHROME_PROFILE_DIR.glob("Profile *"))
+    for profile in profiles:
+        prefs = profile / "Preferences"
+        try:
+            data = json.loads(prefs.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        def walk(node, path: str = "") -> None:
+            if isinstance(node, dict):
+                email = node.get("email")
+                if isinstance(email, str) and _EMAIL_RE.fullmatch(email.strip()):
+                    full_name = node.get("full_name") or node.get("fullName") or node.get("given_name")
+                    name = str(full_name).strip() if isinstance(full_name, str) and full_name.strip() else None
+                    score = 0
+                    low_path = path.lower()
+                    if "account_info" in low_path or "signin" in low_path:
+                        score += 4
+                    if name:
+                        score += 2
+                    if any(k in node for k in ("gaia", "account_id", "accountId")):
+                        score += 1
+                    candidates.append((score, email.strip(), name, profile.name))
+                for key, value in node.items():
+                    walk(value, f"{path}.{key}" if path else str(key))
+            elif isinstance(node, list):
+                for idx, value in enumerate(node):
+                    walk(value, f"{path}[{idx}]")
+
+        walk(data)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, email, name, profile_name = candidates[0]
+    return {
+        "email": email,
+        "name": name,
+        "source": "chrome_profile",
+        "profile": profile_name,
+    }
+
+
+async def inspect_google_account() -> dict:
+    """Return the active Flow Google account's display name/email only."""
+    session = await ensure_flow_session(wait_s=2.0)
+    if not session.get("signedIn"):
+        return {
+            "authenticated": False,
+            "email": None,
+            "name": None,
+            "source": None,
+            "state": session.get("state", "UNKNOWN"),
+        }
+
+    targets = await _targets()
+    flow_target = next(
+        (
+            t for t in targets
+            if t.get("type") == "page"
+            and isinstance(t.get("url"), str)
+            and t["url"].startswith(_FLOW_PREFIXES)
+            and t.get("webSocketDebuggerUrl")
+        ),
+        None,
+    )
+    if flow_target:
+        expression = r"""(() => {
+          const out = [];
+          const seen = new Set();
+          for (const el of document.querySelectorAll('[aria-label],[data-email],[title],img[alt]')) {
+            for (const attr of ['data-email', 'aria-label', 'title', 'alt']) {
+              const value = (el.getAttribute(attr) || '').trim();
+              if (!value || !value.includes('@')) continue;
+              if (attr !== 'data-email' && !/google|account|акаун|обліков/i.test(value)) continue;
+              if (!seen.has(value)) { seen.add(value); out.push(value); }
+            }
+          }
+          return out.slice(0, 20);
+        })()"""
+        try:
+            labels = await _evaluate(flow_target["webSocketDebuggerUrl"], expression, timeout=8)
+        except Exception:
+            labels = []
+        if isinstance(labels, list):
+            for label in labels:
+                if not isinstance(label, str):
+                    continue
+                match = _EMAIL_RE.search(label)
+                if match:
+                    email = match.group(0)
+                    return {
+                        "authenticated": True,
+                        "email": email,
+                        "name": _account_name_from_label(label, email),
+                        "source": "flow_page",
+                        "state": "AUTHENTICATED",
+                    }
+
+    profile = _account_from_profile_preferences()
+    if profile:
+        return {"authenticated": True, **profile, "state": "AUTHENTICATED"}
+    return {
+        "authenticated": True,
+        "email": None,
+        "name": None,
+        "source": None,
+        "state": "AUTHENTICATED_ACCOUNT_UNKNOWN",
+    }
 
 
 async def inspect_flow_session() -> dict:
