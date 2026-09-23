@@ -17,8 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
+import os
 import re
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +33,69 @@ from agent.services.flow_payload_drift import compare_and_record
 
 
 logger = logging.getLogger(__name__)
+
+_UPLOAD_CACHE_DIR = Path(os.environ.get("FLOW_UI_UPLOAD_CACHE_DIR", "/var/lib/flowkit/runtime-input"))
+_UPLOAD_CACHE_TTL_S = float(os.environ.get("FLOW_UI_UPLOAD_CACHE_TTL_S", "86400"))
+
+
+def _safe_upload_suffix(mime_type: str, file_name: str) -> str:
+    suffix = Path(str(file_name or "")).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
+        return suffix
+    guessed = mimetypes.guess_extension(str(mime_type or "").split(";", 1)[0].strip()) or ".bin"
+    return guessed if re.fullmatch(r"\.[a-z0-9]{1,8}", guessed) else ".bin"
+
+
+def _cleanup_upload_cache(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    try:
+        _UPLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for path in _UPLOAD_CACHE_DIR.iterdir():
+            try:
+                if path.is_file() and now - path.stat().st_mtime > _UPLOAD_CACHE_TTL_S:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError as exc:
+        logger.warning("Flow UI upload cache cleanup failed: %s", exc)
+
+
+def cache_uploaded_media_bytes(media_id: str, image_bytes: bytes, *, mime_type: str, file_name: str) -> Path | None:
+    """Keep caller-provided bytes briefly so Flow UI can attach them natively."""
+    if not media_id or not image_bytes:
+        return None
+    try:
+        _cleanup_upload_cache()
+        _UPLOAD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _UPLOAD_CACHE_DIR / f"{media_id}{_safe_upload_suffix(mime_type, file_name)}"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(image_bytes)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        return path
+    except OSError as exc:
+        logger.warning("Could not cache uploaded Flow media %s for UI attach: %s", str(media_id)[:12], exc)
+        return None
+
+
+def cached_uploaded_media_path(media_id: str) -> Path | None:
+    """Return an unexpired service-readable local copy for a Flow media id."""
+    if not media_id:
+        return None
+    try:
+        if not _UPLOAD_CACHE_DIR.exists():
+            return None
+        now = time.time()
+        for path in _UPLOAD_CACHE_DIR.glob(f"{media_id}.*"):
+            if not path.is_file() or path.name.endswith(".tmp"):
+                continue
+            if now - path.stat().st_mtime > _UPLOAD_CACHE_TTL_S:
+                path.unlink(missing_ok=True)
+                continue
+            return path
+    except OSError:
+        return None
+    return None
 
 # API uploads update Flow's backend before the already-open Angular project page
 # refreshes its asset list. Track those ids so the next UI generation can reload
@@ -61,10 +127,13 @@ def _consume_fresh_media_refresh(spec: "UIGenerationSpec") -> bool:
     matched = pending.intersection(referenced)
     if not matched:
         return False
+    # Fresh uploads with cached caller bytes are attached through Flow's own
+    # native Upload-media dialog, so the stale gallery cache is irrelevant.
+    needs_refresh = any(cached_uploaded_media_path(media_id) is None for media_id in matched)
     pending.difference_update(matched)
     if not pending:
         _fresh_uploaded_media.pop(project_id, None)
-    return True
+    return needs_refresh
 
 
 class PickerMediaNotFound(RuntimeError):
@@ -443,6 +512,84 @@ async def _picker_asb_url(project_id: str, media_id: str) -> str | None:
     return fb.find_picker_asb_url_in_text(result.get("data") or "", media_id)
 
 
+async def _wait_cdp_event(cdp: _CDP, method: str, timeout: float = 10.0) -> dict:
+    deadline = time.monotonic() + timeout
+    deferred: list[dict] = []
+    try:
+        while time.monotonic() < deadline:
+            match_index = next((i for i, event in enumerate(cdp.events) if event.get("method") == method), None)
+            if match_index is not None:
+                return cdp.events.pop(match_index)
+            try:
+                event = json.loads(
+                    await asyncio.wait_for(cdp.ws.recv(), timeout=min(.5, max(.1, deadline - time.monotonic())))
+                )
+            except asyncio.TimeoutError:
+                continue
+            if event.get("method") == method:
+                return event
+            deferred.append(event)
+    finally:
+        if deferred:
+            cdp.events.extend(deferred)
+    raise TimeoutError(f"CDP event timed out: {method}")
+
+
+async def _upload_local_media_via_picker(cdp: _CDP, path: Path) -> None:
+    """Attach a local image through Flow's own picker upload lifecycle."""
+    if not path.is_file():
+        raise RuntimeError(f"Flow UI upload cache file is missing: {path}")
+    upload_expr = (
+        "[...document.querySelectorAll('button')].find(b=>b.offsetParent && "
+        "[...b.querySelectorAll('mat-icon,i.google-symbols')].some(i=>(i.textContent||'').trim()==='upload'))"
+    )
+    if not await cdp.evaluate(f"!!({upload_expr})"):
+        raise RuntimeError("Flow picker Upload media button not found")
+
+    await cdp.command("Page.setInterceptFileChooserDialog", {"enabled": True})
+    try:
+        await cdp.trusted_click(upload_expr)
+        event = await _wait_cdp_event(cdp, "Page.fileChooserOpened", timeout=8)
+        backend_node_id = event.get("params", {}).get("backendNodeId")
+        if not backend_node_id:
+            raise RuntimeError("Flow picker file chooser carried no backendNodeId")
+        await cdp.command(
+            "DOM.setFileInputFiles",
+            {"files": [str(path)], "backendNodeId": backend_node_id},
+            timeout=10,
+        )
+    finally:
+        try:
+            await cdp.command("Page.setInterceptFileChooserDialog", {"enabled": False})
+        except Exception:
+            pass
+
+    confirm_expr = (
+        "document.querySelector('.detail-add-to-prompt-btn') || "
+        "[...document.querySelectorAll('button')].find(b=>b.offsetParent && "
+        "/Add to Prompt|Додати до запиту|Добавить в запрос/i.test((b.innerText||'').trim()))"
+    )
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        ready = await cdp.evaluate(
+            f"(() => {{const b=({confirm_expr}); return !!b && !!b.offsetParent && !b.disabled;}})()"
+        )
+        if ready:
+            await cdp.trusted_click(confirm_expr)
+            break
+        await asyncio.sleep(.25)
+    else:
+        raise TimeoutError("Flow picker upload did not become ready to add to prompt")
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        picker_open = await cdp.evaluate("(() => !!document.querySelector('.asset-list-viewport'))()")
+        if not picker_open:
+            return
+        await asyncio.sleep(.2)
+    raise TimeoutError("Flow picker did not close after uploaded media was added")
+
+
 async def _select_picker_media(cdp: _CDP, media_id: str, picker_url: str | None = None) -> None:
     escaped = json.dumps(str(media_id))
     hint_url = json.dumps(str(picker_url or ""))
@@ -527,25 +674,35 @@ async def _clear_selected_media(cdp: _CDP) -> None:
 
 
 async def _add_frame(cdp: _CDP, media_id: str, index: int, project_id: str) -> None:
-    picker_url = await _picker_asb_url(project_id, media_id)
+    local_path = cached_uploaded_media_path(media_id)
+    picker_url = None if local_path else await _picker_asb_url(project_id, media_id)
     chip_expr = f"[...document.querySelectorAll('button.empty-chip')][{index}]"
     exists = await cdp.evaluate(f"!!({chip_expr})")
     if not exists:
         raise RuntimeError(f"Flow frame slot {index} is unavailable")
     await cdp.trusted_click(chip_expr)
     await asyncio.sleep(.45)
-    await _select_picker_media(cdp, media_id, picker_url)
+    if local_path:
+        logger.info("Attaching fresh API upload through Flow UI media dialog media=%s", media_id[:12])
+        await _upload_local_media_via_picker(cdp, local_path)
+    else:
+        await _select_picker_media(cdp, media_id, picker_url)
 
 
 async def _add_ingredient(cdp: _CDP, media_id: str, project_id: str) -> None:
-    picker_url = await _picker_asb_url(project_id, media_id)
+    local_path = cached_uploaded_media_path(media_id)
+    picker_url = None if local_path else await _picker_asb_url(project_id, media_id)
     trigger_expr = "document.querySelector('button.add-menu-trigger')"
     exists = await cdp.evaluate(f"!!({trigger_expr})")
     if not exists:
         raise RuntimeError("Flow ingredients picker trigger is unavailable")
     await cdp.trusted_click(trigger_expr)
     await asyncio.sleep(.45)
-    await _select_picker_media(cdp, media_id, picker_url)
+    if local_path:
+        logger.info("Attaching fresh API upload through Flow UI media dialog media=%s", media_id[:12])
+        await _upload_local_media_via_picker(cdp, local_path)
+    else:
+        await _select_picker_media(cdp, media_id, picker_url)
 
 
 async def _configure_ui_once(cdp: _CDP, spec: UIGenerationSpec) -> None:

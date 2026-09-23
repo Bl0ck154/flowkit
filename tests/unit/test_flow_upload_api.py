@@ -207,10 +207,17 @@ async def test_multipart_route_parses_real_form_data(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_successful_upload_marks_media_for_ui_refresh(monkeypatch):
+async def test_successful_upload_caches_bytes_for_native_ui_attach(monkeypatch, tmp_path):
     client = FakeFlowClient()
     marks = []
+    cached = []
     monkeypatch.setattr(flow_api, "mark_uploaded_media_for_ui_refresh", lambda project_id, media_id: marks.append((project_id, media_id)))
+
+    def fake_cache(media_id, image_bytes, **kwargs):
+        cached.append((media_id, image_bytes, kwargs))
+        return tmp_path / "cached.png"
+
+    monkeypatch.setattr(flow_api, "cache_uploaded_media_bytes", fake_cache)
 
     result = await flow_api._upload_image_bytes(
         client,
@@ -221,4 +228,19 @@ async def test_successful_upload_marks_media_for_ui_refresh(monkeypatch):
     )
 
     assert result["media_id"] == MEDIA
+    assert cached == [(MEDIA, IMAGE, {"mime_type": "image/png", "file_name": "fresh.png"})]
+    assert marks == []
+
+
+@pytest.mark.asyncio
+async def test_upload_marks_gallery_refresh_when_local_cache_fails(monkeypatch):
+    client = FakeFlowClient()
+    marks = []
+    monkeypatch.setattr(flow_api, "cache_uploaded_media_bytes", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flow_api, "mark_uploaded_media_for_ui_refresh", lambda project_id, media_id: marks.append((project_id, media_id)))
+
+    await flow_api._upload_image_bytes(
+        client, IMAGE, project_id=PROJECT, mime_type="image/png", file_name="fresh.png"
+    )
+
     assert marks == [(PROJECT, MEDIA)]

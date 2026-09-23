@@ -195,3 +195,42 @@ def test_fresh_upload_marker_is_consumed_only_for_referenced_media():
     assert ui._consume_fresh_media_refresh(other) is False
     assert ui._consume_fresh_media_refresh(wanted) is True
     assert ui._consume_fresh_media_refresh(wanted) is False
+
+
+def test_cached_uploaded_media_bytes_round_trip(monkeypatch, tmp_path):
+    from agent.services import flow_ui_generation as ui
+
+    monkeypatch.setattr(ui, "_UPLOAD_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ui, "_UPLOAD_CACHE_TTL_S", 3600.0)
+    payload = b"fresh-external-image-bytes"
+
+    path = ui.cache_uploaded_media_bytes(
+        START,
+        payload,
+        mime_type="image/jpeg",
+        file_name="caller-source.jpg",
+    )
+
+    assert path == tmp_path / f"{START}.jpg"
+    assert path.read_bytes() == payload
+    assert ui.cached_uploaded_media_path(START) == path
+
+
+def test_fresh_cached_media_does_not_require_gallery_refresh(monkeypatch, tmp_path):
+    from agent.services import flow_ui_generation as ui
+
+    monkeypatch.setattr(ui, "_UPLOAD_CACHE_DIR", tmp_path)
+    ui._fresh_uploaded_media.clear()
+    ui.cache_uploaded_media_bytes(START, b"x", mime_type="image/png", file_name="x.png")
+    ui.mark_uploaded_media_for_ui_refresh(PROJECT, START)
+    spec = ui.UIGenerationSpec(
+        rpcid=fb.RPC_GEN_VIDEO,
+        project_id=PROJECT,
+        kind="first_frame",
+        prompt="x",
+        aspect=fb.VIDEO_ASPECT_LANDSCAPE,
+        model="abra_i2v_10s",
+        start_media_id=START,
+    )
+
+    assert ui._consume_fresh_media_refresh(spec) is False
