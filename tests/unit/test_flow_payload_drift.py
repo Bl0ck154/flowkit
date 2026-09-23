@@ -81,7 +81,7 @@ def test_image_volatile_values_and_multi_submit_do_not_report_drift():
     assert PROJECT not in dumped
 
 
-def test_first_frame_crop_change_is_detected():
+def test_first_frame_runtime_crop_coordinates_do_not_report_drift():
     expected = fb.omni_first_frame_request(
         "move gently",
         PROJECT,
@@ -91,7 +91,29 @@ def test_first_frame_crop_change_is_detected():
         aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
     )
     actual_inner = _replace_volatile(_inner(expected))
-    actual_inner[0][0][4][5] = [None, 0.0038759689922481244, 1, 0.9961240310077519]
+    actual_inner[0][0][4][5] = [0.32333542713567837, None, 0.6766645728643217, 1]
+
+    report = compare_and_record(
+        fb.RPC_GEN_VIDEO,
+        expected,
+        _post(_freq(fb.RPC_GEN_VIDEO, actual_inner)),
+        spec=parse_generation_spec(fb.RPC_GEN_VIDEO, expected),
+    )
+
+    assert report["detected"] is False
+    assert payload_drift_status()["drift_events"] == 0
+
+
+def test_first_frame_crop_slot_shape_change_is_detected():
+    expected = fb.omni_first_frame_request(
+        "move gently",
+        PROJECT,
+        MEDIA,
+        duration_s=4,
+        resolution="360p",
+    )
+    actual_inner = _replace_volatile(_inner(expected))
+    actual_inner[0][0][4][5] = [None, 0.1, 0.9]
 
     report = compare_and_record(
         fb.RPC_GEN_VIDEO,
@@ -102,7 +124,6 @@ def test_first_frame_crop_change_is_detected():
 
     assert report["detected"] is True
     assert any("[4][5]" in diff["path"] for diff in report["differences"])
-    assert payload_drift_status()["drift_events"] == 1
 
 
 def test_text_video_descriptor_change_is_detected():

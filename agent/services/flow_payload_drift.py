@@ -104,6 +104,23 @@ def _canonical_inner(rpcid: str, inner: Any, *, sensitive: set[str]) -> Any:
                 normalized[1] = [normalized[1][0]]
         except (IndexError, TypeError):
             pass
+
+    # Frame-mode Flow UI computes crop coordinates from each source image's
+    # dimensions/aspect ratio. Those numeric values are runtime geometry, not
+    # wire-schema drift. Preserve whether the crop slot has the expected
+    # 4-element shape, but ignore the coordinates themselves.
+    try:
+        if rpcid == fb.RPC_GEN_VIDEO:
+            crop = normalized[0][0][4][5]
+            if isinstance(crop, list) and len(crop) == 4:
+                normalized[0][0][4][5] = ["<ui-crop>"]
+        elif rpcid == fb.RPC_GEN_VIDEO_FIRST_LAST:
+            for slot in (4, 5):
+                crop = normalized[0][0][slot][5]
+                if isinstance(crop, list) and len(crop) == 4:
+                    normalized[0][0][slot][5] = ["<ui-crop>"]
+    except (IndexError, TypeError):
+        pass
     return normalized
 
 
