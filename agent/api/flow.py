@@ -9,7 +9,14 @@ from agent.config import (
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
 from agent.services.flow_client import get_flow_client
-from agent.services.browser_session import ensure_flow_session, inspect_flow_session, inspect_google_account
+from agent.services.browser_session import (
+    debit_cached_flow_credits,
+    ensure_flow_session,
+    inspect_flow_credits,
+    inspect_flow_session,
+    inspect_google_account,
+)
+from agent.services.flow_credits import credit_response, estimate_video_generation_cost
 from agent.services.image_capabilities import image_capabilities
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -133,6 +140,13 @@ class UpscaleImageRequest(BaseModel):
     quality: Literal["2k", "4k"] = "2k"
 
 
+def _attach_credit_estimate(data: object, snapshot: dict, cost: int | None):
+    if isinstance(data, dict):
+        data["credits"] = credit_response(snapshot, cost)
+    debit_cached_flow_credits(cost)
+    return data
+
+
 @router.get("/status")
 async def extension_status():
     """Report transport state and the real signed-in Flow browser session."""
@@ -187,12 +201,12 @@ async def get_account():
 
 
 @router.get("/credits")
-async def get_credits():
-    """Get user credits from Google Flow."""
+async def get_credits(refresh: bool = False):
+    """Get the real visible Google Flow credit balance."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    result = await client.get_credits()
+    result = await client.get_credits(refresh=refresh)
     if result.get("error"):
         raise HTTPException(502, result["error"])
     return result.get("data", result)
@@ -234,6 +248,7 @@ async def generate_video(body: GenerateVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
         try:
@@ -263,7 +278,22 @@ async def generate_video(body: GenerateVideoRequest):
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    return result.get("data", result)
+
+    data = result.get("data", result)
+    veo_model = None
+    if body.model_family == "veo":
+        gen_type = "start_end_frame_2_video" if body.end_image_media_id else "frame_2_video"
+        veo_model = client._batch_video_model(
+            body.user_paygate_tier, gen_type, body.aspect_ratio
+        )
+    cost = estimate_video_generation_cost(
+        model_family=body.model_family,
+        duration_s=body.duration_s,
+        resolution=body.resolution,
+        model_key=veo_model,
+        plan=credit_snapshot.get("plan"),
+    )
+    return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
 @router.post("/generate-video-refs")
@@ -278,6 +308,7 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    credit_snapshot = await inspect_flow_credits()
 
     if body.model_family == "omni_flash":
         try:
@@ -300,7 +331,21 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
 
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    return result.get("data", result)
+
+    data = result.get("data", result)
+    veo_model = None
+    if body.model_family == "veo" and body.reference_media_ids:
+        veo_model = client._batch_video_model(
+            body.user_paygate_tier, "reference_frame_2_video", body.aspect_ratio
+        )
+    cost = estimate_video_generation_cost(
+        model_family=body.model_family,
+        duration_s=body.duration_s,
+        resolution=body.resolution,
+        model_key=veo_model,
+        plan=credit_snapshot.get("plan"),
+    )
+    return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
 @router.post("/generate-video-omni-text")
@@ -312,6 +357,7 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    credit_snapshot = await inspect_flow_credits()
     try:
         result = await generate_omni_flash_text_video(**body.model_dump())
     except ValueError as exc:
@@ -323,7 +369,14 @@ async def generate_video_omni_text(body: GenerateOmniFlashTextVideoRequest):
             result.get("status", 502),
             result.get("error", result.get("data")),
         )
-    return result.get("data", result)
+    data = result.get("data", result)
+    cost = estimate_video_generation_cost(
+        model_family="omni_flash",
+        duration_s=body.duration_s,
+        resolution="720p",
+        plan=credit_snapshot.get("plan"),
+    )
+    return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
 @router.post("/generate-video-omni")
@@ -336,13 +389,21 @@ async def generate_video_omni(body: GenerateOmniFlashVideoRequest):
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
+    credit_snapshot = await inspect_flow_credits()
     try:
         result = await generate_omni_flash_video(**body.model_dump())
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if result.get("error") or (isinstance(result.get("status"), int) and result["status"] >= 400):
         raise HTTPException(result.get("status", 502), result.get("error", result.get("data")))
-    return result.get("data", result)
+    data = result.get("data", result)
+    cost = estimate_video_generation_cost(
+        model_family="omni_flash",
+        duration_s=body.duration_s,
+        resolution=body.resolution,
+        plan=credit_snapshot.get("plan"),
+    )
+    return _attach_credit_estimate(data, credit_snapshot, cost)
 
 
 @router.post("/upscale-video")

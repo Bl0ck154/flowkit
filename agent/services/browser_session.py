@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -18,6 +19,14 @@ FLOW_URL = "https://flow.google.com/"
 _FLOW_PREFIXES = ("https://flow.google.com/", "https://labs.google/fx/")
 CHROME_PROFILE_DIR = Path(os.environ.get("FLOW_CHROME_PROFILE_DIR", "/var/lib/flowkit/browser-profile"))
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+try:
+    FLOW_CREDIT_CACHE_TTL_S = max(
+        0.0, float(os.environ.get("FLOW_CREDIT_CACHE_TTL_S", "60"))
+    )
+except ValueError:
+    FLOW_CREDIT_CACHE_TTL_S = 60.0
+_flow_credit_cache: dict | None = None
+_flow_credit_cache_at = 0.0
 try:
     FLOW_TAB_IDLE_CLOSE_S = max(0.0, float(os.environ.get("FLOW_TAB_IDLE_CLOSE_S", "0")))
 except ValueError:
@@ -306,6 +315,168 @@ async def inspect_google_account() -> dict:
         "source": None,
         "state": "AUTHENTICATED_ACCOUNT_UNKNOWN",
     }
+
+
+def _cached_flow_credits() -> dict | None:
+    if _flow_credit_cache is None:
+        return None
+    age = max(0.0, time.monotonic() - _flow_credit_cache_at)
+    if age > FLOW_CREDIT_CACHE_TTL_S:
+        return None
+    return {**_flow_credit_cache, "cached": True, "age_s": round(age, 3)}
+
+
+def debit_cached_flow_credits(cost: int | None) -> dict | None:
+    """Optimistically subtract a known generation cost from the short-lived cache."""
+    global _flow_credit_cache, _flow_credit_cache_at
+    if not isinstance(cost, int) or cost < 0 or _flow_credit_cache is None:
+        return _cached_flow_credits()
+    balance = _flow_credit_cache.get("balance")
+    if isinstance(balance, int):
+        _flow_credit_cache = {
+            **_flow_credit_cache,
+            "balance": max(0, balance - cost),
+            "estimated": True,
+        }
+        _flow_credit_cache_at = time.monotonic()
+    return _cached_flow_credits()
+
+
+async def inspect_flow_credits(refresh: bool = False) -> dict:
+    """Read the visible Flow credit balance from the signed-in account panel."""
+    global _flow_credit_cache, _flow_credit_cache_at
+
+    if not refresh:
+        cached = _cached_flow_credits()
+        if cached is not None:
+            return cached
+
+    session = await ensure_flow_session(wait_s=1.0)
+    if not session.get("signedIn"):
+        return {
+            "authenticated": False,
+            "balance": None,
+            "plan": None,
+            "source": None,
+            "state": session.get("state", "UNKNOWN"),
+            "cached": False,
+        }
+
+    targets = await _targets()
+    flow_target = next(
+        (
+            t for t in targets
+            if t.get("type") == "page"
+            and isinstance(t.get("url"), str)
+            and t["url"].startswith(_FLOW_PREFIXES)
+            and t.get("webSocketDebuggerUrl")
+        ),
+        None,
+    )
+    if flow_target is None:
+        return {
+            "authenticated": True,
+            "balance": None,
+            "plan": None,
+            "source": None,
+            "state": "FLOW_TAB_UNAVAILABLE",
+            "cached": False,
+        }
+
+    expression = f"""(async () => {{
+      const forceRefresh = {str(bool(refresh)).lower()};
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+      function snapshot() {{
+        const labels = Array.from(document.querySelectorAll('[aria-label]'));
+        const tier = labels
+          .map(e => e.getAttribute('aria-label') || '')
+          .map(v => v.match(/^(PRO|PLUS|ULTRA|FREE)\\s+tier$/i))
+          .find(Boolean);
+        const plan = tier ? tier[1].toUpperCase() : null;
+
+        const creditEl =
+          document.querySelector('a.credits-link') ||
+          document.querySelector('.credits-info a') ||
+          Array.from(document.querySelectorAll('a,div,span')).find(e => {{
+            const t = (e.textContent || '').trim();
+            return /google\\s+flow/i.test(t) && /(credit|кредит)/i.test(t) && /\\d/.test(t);
+          }});
+        const text = creditEl ? (creditEl.textContent || '').replace(/\\u00a0/g, ' ').trim() : '';
+        const m = text.match(/([\\d\\s.,]+)\\s*(?:google\\s+flow\\s+credits?|flow\\s+credits?|кредит(?:и|ів)?\\s+google\\s+flow)/i);
+        const balance = m ? parseInt(m[1].replace(/[^\\d]/g, ''), 10) : null;
+        return {{ balance: Number.isFinite(balance) ? balance : null, plan, text }};
+      }}
+
+      let value = snapshot();
+      let opened = false;
+      if (value.balance === null) {{
+        const opener = Array.from(document.querySelectorAll('[aria-label]')).find(e => {{
+          const label = (e.getAttribute('aria-label') || '').trim();
+          return e.tagName !== 'A' && !label.includes('@') && /(account|обліков)/i.test(label);
+        }});
+        if (opener) {{
+          opener.click();
+          opened = true;
+          for (let i = 0; i < 8 && value.balance === null; i++) {{
+            await sleep(75);
+            value = snapshot();
+          }}
+        }}
+      }}
+
+      if (forceRefresh) {{
+        const panel = document.querySelector('flow-account-panel,[role="dialog"]');
+        const refreshButton = panel && Array.from(panel.querySelectorAll('button,a,[role="button"]')).find(e =>
+          /^(refresh|оновити)$/i.test((e.innerText || e.textContent || '').trim())
+        );
+        if (refreshButton) {{
+          refreshButton.click();
+          await sleep(700);
+          value = snapshot();
+        }}
+      }}
+
+      if (opened) {{
+        const panel = document.querySelector('flow-account-panel,[role="dialog"]');
+        const closeButton = panel && Array.from(panel.querySelectorAll('button,[role="button"]')).find(e =>
+          (e.innerText || e.textContent || '').trim() === 'close' ||
+          /^(close|закрити)$/i.test((e.getAttribute('aria-label') || '').trim())
+        );
+        if (closeButton) closeButton.click();
+      }}
+      return value;
+    }})()"""
+
+    try:
+        value = await _evaluate(
+            flow_target["webSocketDebuggerUrl"], expression, timeout=10
+        )
+    except Exception as exc:
+        return {
+            "authenticated": True,
+            "balance": None,
+            "plan": None,
+            "source": None,
+            "state": "CREDIT_BALANCE_UNREADABLE",
+            "error": str(exc),
+            "cached": False,
+        }
+
+    value = value if isinstance(value, dict) else {}
+    result = {
+        "authenticated": True,
+        "balance": value.get("balance") if isinstance(value.get("balance"), int) else None,
+        "plan": value.get("plan") if isinstance(value.get("plan"), str) else None,
+        "source": "flow_ui_account_panel",
+        "state": "AUTHENTICATED",
+        "cached": False,
+        "age_s": 0.0,
+    }
+    if result["balance"] is not None:
+        _flow_credit_cache = result.copy()
+        _flow_credit_cache_at = time.monotonic()
+    return result
 
 
 async def inspect_flow_session() -> dict:

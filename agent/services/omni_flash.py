@@ -34,7 +34,8 @@ OMNI_FLASH_VALID_ASPECTS = {
 }
 OMNI_FLASH_MAX_REFERENCE_IMAGES = 7
 # Informational only. Flow pricing can be promotional/variable.
-OMNI_FLASH_CREDIT_COST = {4: 15, 6: 20, 8: 25, 10: 30}
+OMNI_FLASH_CREDIT_COST = {4: 7, 6: 10, 8: 12, 10: 15}
+OMNI_FLASH_360P_CREDIT_COST = {4: 4, 6: 5, 8: 6, 10: 7}
 
 
 async def _fetch_project_initial_data(client, project_id: str) -> dict:

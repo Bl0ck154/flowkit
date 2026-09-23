@@ -31,7 +31,7 @@ from agent.config import (
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
-from agent.services.browser_session import inspect_flow_session, run_flow_batch_rpc
+from agent.services.browser_session import inspect_flow_session, inspect_flow_credits, run_flow_batch_rpc
 from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
@@ -1100,19 +1100,22 @@ class FlowClient:
             fb.RPC_MEDIA, fb.media_request(media_id), timeout=60)
         return fb.read_media_urls(payload, media_id)
 
-    async def get_credits(self) -> dict:
-        """Get user credits and tier.
-
-        The new frontend has no captured credits rpc, and the tier no longer
-        selects a model — aspect is its own slot and the model names are
-        fixed — so on the batch path this answers with the configured default
-        rather than pretending to know.
-        """
+    async def get_credits(self, refresh: bool = False) -> dict:
+        """Get the visible Flow credit balance plus the configured wire tier."""
         if not USE_BATCH_RPC:
             return await self._legacy_get_credits()
+        snapshot = await inspect_flow_credits(refresh=refresh)
         return {"status": 200, "data": {
+            "balance": snapshot.get("balance"),
+            "plan": snapshot.get("plan"),
+            "source": snapshot.get("source"),
+            "cached": snapshot.get("cached", False),
+            "age_s": snapshot.get("age_s"),
             "userPaygateTier": DEFAULT_PAYGATE_TIER,
-            "note": "batchexecute path: tier is configured (DEFAULT_PAYGATE_TIER), not fetched",
+            "note": (
+                "balance is read from Flow's signed-in account panel; "
+                "userPaygateTier remains FlowKit configuration"
+            ),
         }}
 
     async def validate_media_id(self, media_id: str) -> bool:
