@@ -32,6 +32,14 @@ from agent.services.flow_payload_drift import compare_and_record
 logger = logging.getLogger(__name__)
 
 
+class PickerMediaNotFound(RuntimeError):
+    """The backend media exists but the current Flow picker cache cannot see it."""
+
+    def __init__(self, media_id: str):
+        self.media_id = str(media_id)
+        super().__init__(f"Flow media {self.media_id} was not found in the project picker")
+
+
 @dataclass
 class UIGenerationSpec:
     rpcid: str
@@ -442,7 +450,7 @@ async def _select_picker_media(cdp: _CDP, media_id: str, picker_url: str | None 
         }})()"""
     )
     if not isinstance(found, dict) or not found.get("found"):
-        raise RuntimeError(f"Flow media {media_id} was not found in the project picker")
+        raise PickerMediaNotFound(media_id)
 
     asb_token = json.dumps(str(found.get("asbToken") or ""))
     item_expr = f"""(() => {{
@@ -505,7 +513,7 @@ async def _add_ingredient(cdp: _CDP, media_id: str, project_id: str) -> None:
     await _select_picker_media(cdp, media_id, picker_url)
 
 
-async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
+async def _configure_ui_once(cdp: _CDP, spec: UIGenerationSpec) -> None:
     await _open_settings(cdp)
 
     if spec.kind == "image":
@@ -550,6 +558,25 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
                 await _add_ingredient(cdp, mid, spec.project_id)
 
     await _set_prompt(cdp, spec.prompt)
+
+
+async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
+    """Configure Flow and refresh once when the Angular asset cache is stale."""
+    for attempt in range(2):
+        try:
+            await _configure_ui_once(cdp, spec)
+            return
+        except PickerMediaNotFound as exc:
+            if attempt:
+                raise
+            logger.info(
+                "Flow picker cache stale for media=%s project=%s; reloading project UI once",
+                exc.media_id,
+                spec.project_id,
+            )
+            await cdp.command("Page.reload", {"ignoreCache": True})
+            await asyncio.sleep(2.0)
+            await _wait_for_ui(cdp)
 
 
 async def _response_body_for_rpc(cdp: _CDP, rpcid: str, timeout: float) -> tuple[int, str, str]:

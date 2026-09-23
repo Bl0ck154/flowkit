@@ -121,3 +121,48 @@ def test_find_picker_asb_url_from_listing_window():
         + '[[123],null,null,null,null,\\\"' + asb_url + '\\\",[null,null,null,null,1]]'
     )
     assert fb.find_picker_asb_url_in_text(raw, START) == asb_url
+
+
+@pytest.mark.asyncio
+async def test_configure_ui_reloads_once_when_picker_cache_is_stale(monkeypatch):
+    from agent.services import flow_ui_generation as ui
+
+    calls = []
+    attempts = 0
+
+    class FakeCDP:
+        async def command(self, method, params=None, timeout=15):
+            calls.append((method, params or {}))
+            return {}
+
+    async def fake_once(cdp, spec):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ui.PickerMediaNotFound(START)
+
+    async def fake_wait(cdp, timeout=15):
+        calls.append(("wait-ui", {}))
+
+    async def fake_sleep(_):
+        return None
+
+    monkeypatch.setattr(ui, "_configure_ui_once", fake_once)
+    monkeypatch.setattr(ui, "_wait_for_ui", fake_wait)
+    monkeypatch.setattr(ui.asyncio, "sleep", fake_sleep)
+
+    spec = ui.UIGenerationSpec(
+        rpcid=fb.RPC_GEN_VIDEO,
+        project_id=PROJECT,
+        kind="first_frame",
+        prompt="move gently",
+        aspect=fb.VIDEO_ASPECT_LANDSCAPE,
+        model="abra_i2v_10s",
+        duration_s=10,
+        resolution="720p",
+        start_media_id=START,
+    )
+    await ui._configure_ui(FakeCDP(), spec)
+
+    assert attempts == 2
+    assert calls == [("Page.reload", {"ignoreCache": True}), ("wait-ui", {})]
