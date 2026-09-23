@@ -122,6 +122,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_GENERATION_PATHS = {
+    "/api/flow/generate-image",
+    "/api/flow/generate-video",
+    "/api/flow/generate-video-refs",
+    "/api/flow/generate-video-omni",
+    "/api/flow/generate-video-omni-text",
+    "/api/flow/edit-image",
+}
+
+
+@app.middleware("http")
+async def flow_caller_observability(request: Request, call_next):
+    """Attribute generation submits without logging prompts, media or secrets."""
+    response = await call_next(request)
+    if request.method == "POST" and request.url.path in _GENERATION_PATHS:
+        caller = (request.headers.get("x-flowkit-caller") or "unknown")[:80]
+        logger.info(
+            "Flow generation request caller=%s path=%s status=%s",
+            caller,
+            request.url.path,
+            response.status_code,
+        )
+    return response
+
+
 app.include_router(characters_router, prefix="/api")
 app.include_router(projects_router, prefix="/api")
 app.include_router(videos_router, prefix="/api")

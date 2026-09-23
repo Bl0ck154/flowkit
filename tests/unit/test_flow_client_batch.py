@@ -442,16 +442,22 @@ class TestMediaAndUpload:
 
 
 class TestProjectAndCredits:
-    async def test_create_project_hands_back_the_pinned_one(self, client):
+    async def test_create_project_uses_current_batch_rpc(self, client):
+        client.responses[fb.RPC_CREATE_PROJECT] = {
+            "data": envelope(fb.RPC_CREATE_PROJECT, [PROJECT, ["My Film"]])
+        }
         result = await client.create_project("My Film")
         assert result["data"]["projectId"] == PROJECT
+        assert result["data"]["title"] == "My Film"
+        assert client.calls[0]["rpcid"] == fb.RPC_CREATE_PROJECT
+        outer = json.loads(client.calls[0]["freq"])
+        inner = json.loads(outer[0][0][1])
+        assert inner == ["projects/*", [None, ["My Film"]], [None, fb.SURFACE_ID]]
 
-    async def test_create_project_without_a_pin_explains_itself(self, client, monkeypatch):
-        import agent.services.flow_client as module
-        monkeypatch.setattr(module, "FLOW_PROJECT_ID", "")
-        result = await client.create_project("My Film")
-        assert "NO_FLOW_PROJECT" in result["error"]
-        assert "FLOW_PROJECT_ID" in result["error"]
+    async def test_flow_project_id_only_accepts_explicit_ids(self, client):
+        assert client.flow_project_id(PROJECT) == PROJECT
+        assert client.flow_project_id("") is None
+        assert client.flow_project_id("not-a-project") is None
 
     async def test_credits_answers_the_configured_tier_rather_than_guessing(self, client):
         result = await client.get_credits()

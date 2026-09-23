@@ -40,6 +40,7 @@ RPC_GEN_VIDEO_TEXT = "YhhmEf"
 RPC_GEN_VIDEO_FIRST_LAST = "nprQif"
 RPC_GEN_VIDEO_REFERENCES = "MZZa6b"
 RPC_OPERATION = "jwpduf"
+RPC_CREATE_PROJECT = "jHPbke"
 RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
 RPC_UPLOAD_IMAGE = "maseQ"
@@ -537,6 +538,22 @@ def upload_request(image_b64: str, project_id: str, mime_type: str = "image/jpeg
         _context(project_id), image_b64, mime_type, 1, None, None, None, None,
         file_name, None, _client_uuid(), _client_uuid(),
     ])
+
+
+def create_project_request(title: str) -> str:
+    """Create a current Flow project (captured from flow.google.com UI)."""
+    clean = " ".join(str(title or "FlowKit project").split())[:160] or "FlowKit project"
+    return build_envelope(
+        RPC_CREATE_PROJECT,
+        ["projects/*", [None, [clean]], [None, SURFACE_ID]],
+    )
+
+
+def read_created_project(payload: Any) -> tuple[str, str | None]:
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], str):
+        raise FlowBatchError("project create response did not contain a project id")
+    title = payload[1][0] if len(payload) > 1 and isinstance(payload[1], list) and payload[1] else None
+    return payload[0], title if isinstance(title, str) else None
 
 
 def operation_request(operation_id: str) -> str:
