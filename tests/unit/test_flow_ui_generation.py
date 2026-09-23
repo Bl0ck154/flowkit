@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from agent.services import flow_batch as fb
 from agent.services.flow_ui_generation import parse_generation_spec
 
@@ -89,3 +91,33 @@ def test_parse_reference_video_spec():
     assert spec.reference_media_ids == [START, REF2]
     assert spec.duration_s == 4
     assert spec.resolution == "360p"
+
+
+@pytest.mark.asyncio
+async def test_picker_asb_url_uses_last_media_record(monkeypatch):
+    media_id = START
+    asb_url = "https://lh3.googleusercontent.com/asb/OPAQUE_PICKER_TOKEN"
+    calls = []
+
+    async def fake_batch_rpc(rpcid, freq, **kwargs):
+        calls.append((rpcid, freq, kwargs))
+        return {"status": 200, "data": media_id + '\\\",null,[[123],null,null,null,null,\\\"' + asb_url + '\\\"'}
+
+    monkeypatch.setattr("agent.services.flow_ui_generation.bs.run_flow_batch_rpc", fake_batch_rpc)
+    from agent.services.flow_ui_generation import _picker_asb_url
+
+    assert await _picker_asb_url(PROJECT, media_id) == asb_url
+    assert calls[0][0] == fb.RPC_PROJECT_MEDIA
+    assert calls[0][2]["match"] == media_id
+    assert calls[0][2]["match_last"] is True
+    assert calls[0][2]["project_id"] == PROJECT
+
+
+def test_find_picker_asb_url_from_listing_window():
+    asb_url = "https://lh3.googleusercontent.com/asb/AB-nOU_example_token"
+    raw = (
+        START
+        + '\\\",\\\"' + PROJECT + '\\\",\\\"asset-id\\\",\\\"CAE\\\",null,'
+        + '[[123],null,null,null,null,\\\"' + asb_url + '\\\",[null,null,null,null,1]]'
+    )
+    assert fb.find_picker_asb_url_in_text(raw, START) == asb_url

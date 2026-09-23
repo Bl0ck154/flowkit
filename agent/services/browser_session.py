@@ -617,6 +617,7 @@ async def _run_flow_batch_rpc_once(
     *,
     captcha_action: str | None = None,
     match: str | None = None,
+    match_last: bool = False,
     project_id: str | None = None,
     timeout: float = 120,
     max_text: int = 32_000_000,
@@ -687,6 +688,7 @@ async def _run_flow_batch_rpc_once(
       let freqStr = {json.dumps(freq)};
       const captchaAction = {json.dumps(captcha_action)};
       const match = {json.dumps(match)};
+      const matchLast = {str(bool(match_last)).lower()};
       const maxText = {int(max_text)};
       const siteKey = {json.dumps(site_key)};
       const wiz = globalThis.WIZ_global_data || {{}};
@@ -755,7 +757,7 @@ async def _run_flow_batch_rpc_once(
       const resp = await responsePromise;
       const text = await resp.text();
       if (match) {{
-        const found = text.indexOf(match);
+        const found = matchLast ? text.lastIndexOf(match) : text.indexOf(match);
         return {{
           status: resp.status,
           matched: found !== -1,
@@ -791,6 +793,7 @@ async def run_flow_batch_rpc(
     *,
     captcha_action: str | None = None,
     match: str | None = None,
+    match_last: bool = False,
     project_id: str | None = None,
     timeout: float = 120,
     max_text: int = 32_000_000,
@@ -803,6 +806,7 @@ async def run_flow_batch_rpc(
             freq,
             captcha_action=captcha_action,
             match=match,
+            match_last=match_last,
             project_id=project_id,
             timeout=timeout,
             max_text=max_text,

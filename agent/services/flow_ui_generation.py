@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -26,6 +27,9 @@ import websockets
 from agent.services import browser_session as bs
 from agent.services import flow_batch as fb
 from agent.services.flow_payload_drift import compare_and_record
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -345,8 +349,30 @@ async def _set_prompt(cdp: _CDP, prompt: str) -> None:
     await asyncio.sleep(.35)
 
 
-async def _select_picker_media(cdp: _CDP, media_id: str) -> None:
+async def _picker_asb_url(project_id: str, media_id: str) -> str | None:
+    """Resolve a Flow media id to the exact /asb/ thumbnail used by the picker."""
+    try:
+        result = await bs.run_flow_batch_rpc(
+            fb.RPC_PROJECT_MEDIA,
+            fb.project_media_request(project_id),
+            match=media_id,
+            match_last=True,
+            project_id=project_id,
+            timeout=60,
+            max_text=2_000,
+        )
+    except Exception as exc:
+        logger.debug("Picker media lookup failed for %s: %s", media_id[:12], exc)
+        return None
+    if result.get("error"):
+        logger.debug("Picker media lookup error for %s: %s", media_id[:12], result.get("error"))
+        return None
+    return fb.find_picker_asb_url_in_text(result.get("data") or "", media_id)
+
+
+async def _select_picker_media(cdp: _CDP, media_id: str, picker_url: str | None = None) -> None:
     escaped = json.dumps(str(media_id))
+    hint_url = json.dumps(str(picker_url or ""))
     # The picker is a CDK virtual scroll: old project assets may not exist in
     # the DOM until their row is scrolled into view. Walk the viewport instead
     # of assuming the desired media is among the first visible items. Uploaded
@@ -355,10 +381,12 @@ async def _select_picker_media(cdp: _CDP, media_id: str) -> None:
     found = await cdp.evaluate(
         f"""(async () => {{
           const wanted={escaped};
+          const hintUrl={hint_url};
           const viewport=document.querySelector('.asset-list-viewport');
           const grid=[...document.querySelectorAll('[data-media-id]')].find(e=>e.getAttribute('data-media-id')===wanted);
           const gridSrc=grid?.src||'';
-          const asbRaw=gridSrc.includes('/asb/') ? gridSrc.split('/asb/')[1].split(/[?#]/)[0] : '';
+          const sourceUrl=hintUrl||gridSrc;
+          const asbRaw=sourceUrl.includes('/asb/') ? sourceUrl.split('/asb/')[1].split(/[?#]/)[0] : '';
           const asbToken=asbRaw.replace(/=s[0-9].*$/, '');
           const matches=(src)=>{{
             src=src||'';
@@ -425,22 +453,24 @@ async def _clear_selected_media(cdp: _CDP) -> None:
         raise RuntimeError("Flow composer media chips could not be reset")
 
 
-async def _add_frame(cdp: _CDP, media_id: str, index: int) -> None:
+async def _add_frame(cdp: _CDP, media_id: str, index: int, project_id: str) -> None:
+    picker_url = await _picker_asb_url(project_id, media_id)
     opened = await cdp.evaluate(
         f"(() => {{const chips=[...document.querySelectorAll('button.empty-chip')]; const b=chips[{index}]; if(!b)return false;b.click();return true;}})()"
     )
     if not opened:
         raise RuntimeError(f"Flow frame slot {index} is unavailable")
     await asyncio.sleep(.45)
-    await _select_picker_media(cdp, media_id)
+    await _select_picker_media(cdp, media_id, picker_url)
 
 
-async def _add_ingredient(cdp: _CDP, media_id: str) -> None:
+async def _add_ingredient(cdp: _CDP, media_id: str, project_id: str) -> None:
+    picker_url = await _picker_asb_url(project_id, media_id)
     opened = await cdp.evaluate("(() => {const b=document.querySelector('button.add-menu-trigger'); if(!b)return false;b.click();return true})()")
     if not opened:
         raise RuntimeError("Flow ingredients picker trigger is unavailable")
     await asyncio.sleep(.45)
-    await _select_picker_media(cdp, media_id)
+    await _select_picker_media(cdp, media_id, picker_url)
 
 
 async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
@@ -458,7 +488,7 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         await asyncio.sleep(.2)
         await _clear_selected_media(cdp)
         for mid in spec.reference_media_ids:
-            await _add_ingredient(cdp, mid)
+            await _add_ingredient(cdp, mid, spec.project_id)
     else:
         await _click_radio_icon(cdp, "videocam")
         if spec.kind in {"first_frame", "first_last"}:
@@ -478,14 +508,14 @@ async def _configure_ui(cdp: _CDP, spec: UIGenerationSpec) -> None:
         if spec.kind in {"first_frame", "first_last"}:
             if not spec.start_media_id:
                 raise RuntimeError("first-frame generation is missing start media")
-            await _add_frame(cdp, spec.start_media_id, 0)
+            await _add_frame(cdp, spec.start_media_id, 0, spec.project_id)
             if spec.kind == "first_last":
                 if not spec.end_media_id:
                     raise RuntimeError("first+last generation is missing end media")
-                await _add_frame(cdp, spec.end_media_id, 1)
+                await _add_frame(cdp, spec.end_media_id, 1, spec.project_id)
         elif spec.kind == "references":
             for mid in spec.reference_media_ids:
-                await _add_ingredient(cdp, mid)
+                await _add_ingredient(cdp, mid, spec.project_id)
 
     await _set_prompt(cdp, spec.prompt)
 
@@ -574,6 +604,13 @@ async def run_flow_ui_generation(rpcid: str, freq: str, *, project_id: str | Non
             drift = compare_and_record(rpcid, freq, post_data, spec=spec)
             return {"status": status, "data": body, "payload_drift": drift}
     except Exception as exc:
+        logger.warning(
+            "UI generation failed rpc=%s kind=%s project=%s error=%s",
+            rpcid,
+            spec.kind,
+            pid,
+            exc,
+        )
         return {"error": f"UI_GENERATION_FAILED: {exc}"}
     finally:
         bs._schedule_flow_tab_idle_close()

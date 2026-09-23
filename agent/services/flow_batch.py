@@ -774,6 +774,24 @@ def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
+_PICKER_ASB_URL = re.compile(r'https://lh3\.googleusercontent\.com/asb/[^"\\]+')
+
+
+def find_picker_asb_url_in_text(text: str, media_id: str) -> Optional[str]:
+    """Return the picker thumbnail URL from a media-detail listing window.
+
+    ``Zzl0ze`` contains each media id twice: first in a lightweight project
+    metadata row, then in the detailed media record that carries the ``/asb/``
+    thumbnail used by Flow's asset picker. Callers should request a window
+    around the *last* occurrence of ``media_id``.
+    """
+    start = text.find(media_id)
+    if start == -1:
+        return None
+    match = _PICKER_ASB_URL.search(text, start, start + 800)
+    return match.group(0) if match else None
+
+
 def read_media_urls(payload: Any, media_id: str) -> MediaUrls:
     video = image = None
     for text in _walk_strings(payload):
