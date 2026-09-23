@@ -444,6 +444,18 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
 
     error_lower = str(error_msg).lower()
 
+    # PUBLIC_ERROR_UNUSUAL_ACTIVITY is a Google anti-abuse/session trust block,
+    # not an ordinary CAPTCHA mint failure. Retrying it in the generic CAPTCHA
+    # loop only creates more generation submits while Google is asking us to
+    # slow down, so stop this request and require an explicit resubmit after
+    # the session/network has recovered.
+    if "public_error_unusual_activity" in error_lower or "unusual activity" in error_lower:
+        await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+        await _mark_scene_failed(req)
+        logger.error("Request %s FAILED (Google unusual-activity block; manual recovery required): %s",
+                     rid[:8], error_msg)
+        return
+
     # A capability the batch path does not have, or a missing Flow project, is
     # a configuration answer — not something a retry can reach. Fail it once.
     if "unsupported_on_batch_api" in error_lower or "no_flow_project" in error_lower:
