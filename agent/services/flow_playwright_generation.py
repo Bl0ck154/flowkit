@@ -165,7 +165,7 @@ async def _wait_picker_closed(page: Any, timeout_ms: int = 15_000) -> None:
         await viewport.wait_for(state="hidden", timeout=timeout_ms)
 
 
-async def _commit_selected_asset(page: Any) -> None:
+async def _commit_selected_asset(page: Any, *, wait_for_picker_close: bool = True) -> None:
     add = page.locator("button.detail-add-to-prompt-btn:visible").first
     if await add.count():
         deadline = asyncio.get_running_loop().time() + 45
@@ -174,14 +174,16 @@ async def _commit_selected_asset(page: Any) -> None:
                 raise TimeoutError("Flow picker selection did not become ready to add")
             await asyncio.sleep(.25)
         await add.click()
-        await _wait_picker_closed(page)
+        if wait_for_picker_close:
+            await _wait_picker_closed(page)
         await page.wait_for_timeout(350)
         return
     # Some frame-picker cohorts close immediately after selecting a tile.
-    await _wait_picker_closed(page)
+    if wait_for_picker_close:
+        await _wait_picker_closed(page)
 
 
-async def _upload_local_media(page: Any, path: Path) -> None:
+async def _upload_local_media(page: Any, path: Path, *, wait_for_picker_close: bool = True) -> None:
     upload = page.locator("button.sidebar-upload-btn:visible").first
     if not await upload.count():
         upload = page.locator("button:visible").filter(
@@ -192,7 +194,7 @@ async def _upload_local_media(page: Any, path: Path) -> None:
         await upload.click()
     chooser = await chooser_info.value
     await chooser.set_files(str(path))
-    await _commit_selected_asset(page)
+    await _commit_selected_asset(page, wait_for_picker_close=wait_for_picker_close)
 
 
 async def _scroll_until_tile(page: Any, tile: Any) -> bool:
@@ -220,7 +222,13 @@ async def _scroll_until_tile(page: Any, tile: Any) -> bool:
     return bool(await tile.count())
 
 
-async def _select_existing_media(page: Any, project_id: str, media_id: str) -> None:
+async def _select_existing_media(
+    page: Any,
+    project_id: str,
+    media_id: str,
+    *,
+    wait_for_picker_close: bool = True,
+) -> None:
     picker_url = await _picker_asb_url(project_id, media_id)
     if not picker_url or "/asb/" not in picker_url:
         raise RuntimeError(f"Flow media {media_id} has no picker thumbnail mapping")
@@ -232,7 +240,7 @@ async def _select_existing_media(page: Any, project_id: str, media_id: str) -> N
         raise RuntimeError(f"Flow media {media_id} was not found in the project picker")
     await tile.click()
     await page.wait_for_timeout(250)
-    await _commit_selected_asset(page)
+    await _commit_selected_asset(page, wait_for_picker_close=wait_for_picker_close)
 
 
 async def _attach_frame(page: Any, spec: UIGenerationSpec, media_id: str, index: int) -> None:
@@ -252,13 +260,48 @@ async def _attach_frame(page: Any, spec: UIGenerationSpec, media_id: str, index:
 async def _attach_ingredient(page: Any, spec: UIGenerationSpec, media_id: str) -> None:
     trigger = page.locator("button.add-menu-trigger:visible").first
     await trigger.wait_for(state="visible", timeout=8_000)
-    await trigger.click()
-    await page.wait_for_timeout(500)
+
+    # Some Flow cohorts automatically leave the ingredient menu open after
+    # switching to reference-video mode. Clicking the already-expanded trigger
+    # is then intercepted by the menu backdrop and times out. Reuse the open
+    # overlay instead of toggling the trigger again.
+    if await trigger.get_attribute("aria-expanded") != "true":
+        await trigger.click()
+        await page.wait_for_timeout(500)
+    else:
+        await page.wait_for_timeout(150)
+
+    # If aria-expanded was stale but no picker/menu controls actually rendered,
+    # reset the overlay once and reopen it deterministically.
+    upload = page.locator("button.sidebar-upload-btn:visible").first
+    picker = page.locator(".asset-list-viewport:visible").first
+    if not await upload.count() and not await picker.count():
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(200)
+        await trigger.click()
+        await page.wait_for_timeout(500)
+
     local_path = cached_uploaded_media_path(media_id)
     if local_path is not None:
-        await _upload_local_media(page, local_path)
+        await _upload_local_media(page, local_path, wait_for_picker_close=False)
     else:
-        await _select_existing_media(page, spec.project_id, media_id)
+        await _select_existing_media(
+            page,
+            spec.project_id,
+            media_id,
+            wait_for_picker_close=False,
+        )
+
+
+async def _close_ingredient_picker(page: Any) -> None:
+    picker = page.locator(".asset-list-viewport:visible").first
+    for _ in range(3):
+        if not await picker.count():
+            return
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(250)
+    if await picker.count():
+        raise RuntimeError("Flow ingredient picker could not be closed")
 
 
 async def _set_prompt(page: Any, prompt: str) -> None:
@@ -311,6 +354,7 @@ async def _configure(page: Any, spec: UIGenerationSpec) -> None:
         elif spec.kind == "references":
             for media_id in spec.reference_media_ids:
                 await _attach_ingredient(page, spec, media_id)
+            await _close_ingredient_picker(page)
     await _set_prompt(page, spec.prompt)
 
 
