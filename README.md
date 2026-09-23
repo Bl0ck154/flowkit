@@ -192,16 +192,54 @@ curl -X POST http://127.0.0.1:8100/api/flow/generate-video-omni-text \
 
 ### Upload an image
 
+For **external/API callers**, send the image bytes directly. Do not pass a path from the caller's filesystem: `flowkit-agent.service` runs as its own `flowkit` user and uses systemd isolation such as `PrivateTmp=yes`, so caller-local `/tmp/...`, `/root/...` and other protected paths may not exist or be readable inside the service.
+
+#### Recommended: multipart file upload
+
+```bash
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image-file \
+  -F 'file=@./source.jpg;type=image/jpeg'
+```
+
+You can optionally pass an existing Flow project:
+
+```bash
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image-file \
+  -F 'file=@./source.jpg;type=image/jpeg' \
+  -F 'project_id=YOUR_FLOW_PROJECT_ID'
+```
+
+If `project_id` is omitted, FlowKit automatically uses/creates the current session project.
+
+#### JSON/base64 upload
+
+Useful when your client already transports JSON:
+
+```bash
+IMAGE_B64="$(base64 -w0 ./source.jpg)"
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image \
+  -H 'Content-Type: application/json' \
+  -d "{\"image_base64\":\"$IMAGE_B64\",\"mime_type\":\"image/jpeg\",\"file_name\":\"source.jpg\"}"
+```
+
+Base64 is supported for compatibility and JSON-only clients, but expands the request by roughly one third compared with multipart.
+
+#### Server-local `file_path` mode
+
+`file_path` remains available as a convenience **only when the image already exists on the FlowKit server** and is readable by the `flowkit` service user:
+
 ```bash
 curl -X POST http://127.0.0.1:8100/api/flow/upload-image \
   -H 'Content-Type: application/json' \
   -d '{
-    "file_path": "/absolute/path/to/source.jpg",
+    "file_path": "/var/lib/flowkit/imports/source.jpg",
     "file_name": "source.jpg"
   }'
 ```
 
-The response contains a Flow `media_id` that can be reused for video generation.
+Do not use caller-local `/tmp/...` paths for this mode. With systemd `PrivateTmp=yes`, the FlowKit service sees a different `/tmp` namespace. Unreadable paths return a clear 403, and paths not visible in the service namespace return a descriptive 404 instead of an internal traceback.
+
+The response contains a Flow `media_id` and the resolved `project_id`, both of which can be reused for later generation.
 
 ### Image-to-video with Omni Flash
 
