@@ -32,6 +32,7 @@ from agent.config import (
 from agent import config as _config
 from agent.services import flow_batch as fb
 from agent.services.browser_session import inspect_flow_session, inspect_flow_credits, run_flow_batch_rpc
+from agent.services.flow_ui_generation import run_flow_ui_generation
 from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
@@ -556,7 +557,14 @@ class FlowClient:
         # the new transport independent of which MV3 package version Chrome
         # currently has installed; the extension remains responsible for the
         # legacy bridge and telemetry, while cookies/CSRF/reCAPTCHA stay in-page.
-        is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
+        generation_rpcs = {
+            fb.RPC_GEN_IMAGE,
+            fb.RPC_GEN_VIDEO,
+            fb.RPC_GEN_VIDEO_TEXT,
+            fb.RPC_GEN_VIDEO_FIRST_LAST,
+            fb.RPC_GEN_VIDEO_REFERENCES,
+        }
+        is_generation = rpcid in generation_rpcs
         if not is_generation:
             return await run_flow_batch_rpc(
                 rpcid,
@@ -599,11 +607,9 @@ class FlowClient:
                     await asyncio.sleep(delay)
                 self._generation_last_submit_at = time.monotonic()
 
-            result = await run_flow_batch_rpc(
+            result = await run_flow_ui_generation(
                 rpcid,
                 freq,
-                captcha_action=captcha_action,
-                match=match,
                 project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
                 timeout=timeout,
             )
