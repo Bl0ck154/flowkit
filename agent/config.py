@@ -51,7 +51,13 @@ FLOW_ALLOW_DEGRADED = os.environ.get("FLOW_ALLOW_DEGRADED", "0") == "1"
 # bursts across agents/integrations sharing the same FlowKit instance.
 FLOW_GENERATION_MIN_INTERVAL_S = max(0.0, float(os.environ.get("FLOW_GENERATION_MIN_INTERVAL_S", "3")))
 FLOW_GENERATION_MAX_CONCURRENT = max(1, int(os.environ.get("FLOW_GENERATION_MAX_CONCURRENT", "1")))
-FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "120")))
+FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "1800")))
+_flow_risk_state_file = os.environ.get("FLOW_RISK_STATE_FILE")
+FLOW_RISK_STATE_FILE = (
+    Path(_flow_risk_state_file)
+    if _flow_risk_state_file
+    else (BASE_DIR / "flow_risk_state.json" if os.environ.get("FLOW_AGENT_DIR") else None)
+)
 
 # The tier no longer picks a model — aspect is its own slot and the model names
 # are fixed — so it is only carried for the DB column and the dashboard.

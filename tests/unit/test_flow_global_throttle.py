@@ -79,3 +79,45 @@ async def test_upload_with_image_captcha_stays_on_direct_batch_transport(monkeyp
     assert result["data"] == "uploaded"
     assert len(direct_calls) == 1
     assert ui_calls == []
+
+
+@pytest.mark.asyncio
+async def test_unusual_activity_cooldown_survives_client_restart(monkeypatch, tmp_path):
+    risk_file = tmp_path / "flow-risk.json"
+    monkeypatch.setattr(fc, "FLOW_RISK_STATE_FILE", risk_file)
+    monkeypatch.setattr(fc, "FLOW_GENERATION_MAX_CONCURRENT", 1)
+    monkeypatch.setattr(fc, "FLOW_GENERATION_MIN_INTERVAL_S", 0.0)
+    monkeypatch.setattr(fc, "FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", 1800.0)
+
+    async def rejected(*args, **kwargs):
+        return {"status": 200, "data": "PUBLIC_ERROR_UNUSUAL_ACTIVITY"}
+
+    monkeypatch.setattr(fc, "run_flow_ui_generation", rejected)
+    first_client = fc.FlowClient()
+    await first_client.batch_rpc(
+        fb.RPC_GEN_IMAGE,
+        "x",
+        captcha_action=fb.CAPTCHA_IMAGE,
+    )
+
+    assert risk_file.exists()
+
+    calls = 0
+
+    async def should_not_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {"status": 200, "data": "unexpected"}
+
+    monkeypatch.setattr(fc, "run_flow_ui_generation", should_not_run)
+    restarted_client = fc.FlowClient()
+    result = await restarted_client.batch_rpc(
+        fb.RPC_GEN_IMAGE,
+        "y",
+        captcha_action=fb.CAPTCHA_IMAGE,
+    )
+
+    assert result["status"] == 429
+    assert "local cooldown active" in result["error"]
+    assert calls == 0
+    assert restarted_client._generation_last_unusual_rpc == fb.RPC_GEN_IMAGE

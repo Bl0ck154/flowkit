@@ -27,7 +27,7 @@ from agent.config import (
     USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
-    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, FLOW_RISK_STATE_FILE,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
@@ -80,11 +80,53 @@ class FlowClient:
         self._generation_unusual_until = 0.0
         self._generation_last_unusual_at: Optional[float] = None
         self._generation_last_unusual_rpc: Optional[str] = None
+        self._restore_generation_risk_state()
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
         self._ws_connected_at: Optional[float] = None
         self._ws_last_disconnect_at: Optional[float] = None
+
+    def _restore_generation_risk_state(self) -> None:
+        """Restore a Google unusual-activity cooldown across agent restarts."""
+        if FLOW_RISK_STATE_FILE is None:
+            return
+        try:
+            payload = json.loads(FLOW_RISK_STATE_FILE.read_text(encoding="utf-8"))
+            last_at = payload.get("last_unusual_activity_at")
+            last_rpc = payload.get("last_unusual_activity_rpc")
+            until_epoch = float(payload.get("cooldown_until_epoch") or 0.0)
+            self._generation_last_unusual_at = float(last_at) if last_at is not None else None
+            self._generation_last_unusual_rpc = str(last_rpc) if last_rpc else None
+            remaining = max(0.0, until_epoch - time.time())
+            if remaining > 0:
+                self._generation_unusual_until = time.monotonic() + remaining
+                logger.warning(
+                    "Restored Google unusual-activity cooldown from disk; %.0fs remaining",
+                    remaining,
+                )
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.warning("Could not restore Flow generation risk state: %s", exc)
+
+    def _persist_generation_risk_state(self) -> None:
+        """Atomically persist non-secret WAF cooldown metadata."""
+        if FLOW_RISK_STATE_FILE is None:
+            return
+        remaining = max(0.0, self._generation_unusual_until - time.monotonic())
+        payload = {
+            "last_unusual_activity_at": self._generation_last_unusual_at,
+            "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
+            "cooldown_until_epoch": time.time() + remaining,
+        }
+        try:
+            FLOW_RISK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = FLOW_RISK_STATE_FILE.with_name(FLOW_RISK_STATE_FILE.name + ".tmp")
+            tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            tmp.replace(FLOW_RISK_STATE_FILE)
+        except OSError as exc:
+            logger.warning("Could not persist Flow generation risk state: %s", exc)
 
     def set_extension(self, ws):
         """Called when extension connects via WS."""
@@ -624,6 +666,7 @@ class FlowClient:
                 )
                 self._generation_last_unusual_at = time.time()
                 self._generation_last_unusual_rpc = rpcid
+                self._persist_generation_risk_state()
                 logger.warning(
                     "Google unusual-activity block detected; pausing generation submits for %.0fs",
                     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
