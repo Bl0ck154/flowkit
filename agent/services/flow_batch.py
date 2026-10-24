@@ -59,13 +59,22 @@ CAPTCHA_SLOT = "__CAPTCHA__"
 #: ids are accepted by ``resolve_image_model`` instead of being silently
 #: replaced by the default, so callers can opt into a newly exposed model
 #: before Flow Kit itself ships another release.
-IMAGE_MODELS = {"GEM_PIX_2", "NARWHAL", "HARBOR_SEAL"}
+#:
+#: BELUGA is Nano Banana 2.1 (the UI's `beluga_display`); the THINKING
+#: variants are values 37-39 of the same enum in the Flow bundle. Banana 2
+#: (`NARWHAL`) has answered `[5]` NOT_FOUND in every project since early
+#: October 2026, so the NANO_BANANA_2 nickname now lands on its successor.
+IMAGE_MODELS = {
+    "GEM_PIX_2", "NARWHAL", "HARBOR_SEAL",
+    "BELUGA", "BELUGA_THINKING_LOW", "BELUGA_THINKING_MED", "BELUGA_THINKING_HIGH",
+}
 IMAGE_MODEL = "GEM_PIX_2"
 
 #: Friendly aliases. Exact Flow wire ids work too.
 IMAGE_MODEL_BY_NICKNAME = {
     "NANO_BANANA_PRO": "GEM_PIX_2",
-    "NANO_BANANA_2": "NARWHAL",
+    "NANO_BANANA_2_1": "BELUGA",
+    "NANO_BANANA_2": "BELUGA",
     "NANO_BANANA_2_LITE": "HARBOR_SEAL",
     "NANO_BANANA_LITE": "HARBOR_SEAL",
 }
