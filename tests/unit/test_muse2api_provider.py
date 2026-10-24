@@ -88,9 +88,9 @@ def start_image(tmp_path):
     return "file://" + str(p)
 
 
-async def test_image_is_saved_locally_with_minted_uuid(provider, gateway):
+async def test_image_is_saved_locally_with_minted_uuid(provider, gateway, start_image):
     job = ProviderJob(job_id="img1", kind=KIND_IMAGE, prompt="a fox",
-                      orientation="HORIZONTAL", reference_urls=("file:///x.png",),
+                      orientation="HORIZONTAL", reference_urls=(start_image,),
                       extra={"composition": "wide establishing shot"})
     result = await provider.run(job)
 
@@ -106,6 +106,48 @@ async def test_image_is_saved_locally_with_minted_uuid(provider, gateway):
     assert body["model"] == "muse-image"
     assert body["response_format"] == "b64_json"
     assert "wide establishing shot" in body["prompt"]
+    assert body["image"] == ["data:image/png;base64," + base64.b64encode(PNG).decode()]
+
+
+async def test_image_without_refs_sends_no_image_field(provider, gateway):
+    job = ProviderJob(job_id="img2", kind=KIND_IMAGE, prompt="a fox", orientation="VERTICAL")
+    assert parse_result(await provider.run(job), "GENERATE_IMAGE").success
+    assert "image" not in gateway.calls[0][2]
+
+
+async def test_image_refs_are_deduped_and_capped_at_four(provider, gateway, tmp_path):
+    refs = []
+    for i in range(6):
+        p = tmp_path / f"ref{i}.png"
+        p.write_bytes(PNG + bytes([i]))
+        refs.append("file://" + str(p))
+    job = ProviderJob(job_id="img3", kind=KIND_IMAGE, prompt="a fox",
+                      orientation="VERTICAL", reference_urls=(refs[0], refs[0], *refs[1:]))
+    assert parse_result(await provider.run(job), "GENERATE_IMAGE").success
+
+    sent = gateway.calls[0][2]["image"]
+    assert len(sent) == 4
+    assert sent == ["data:image/png;base64," + base64.b64encode(PNG + bytes([i])).decode()
+                    for i in range(4)]
+
+
+async def test_unreadable_ref_fails_the_job_instead_of_dropping_the_character(provider, gateway):
+    job = ProviderJob(job_id="img4", kind=KIND_IMAGE, prompt="a fox",
+                      orientation="VERTICAL", reference_urls=("file:///no/such/ref.png",))
+    result = await provider.run(job)
+    assert "error" in result and "ref.png" in result["error"]
+    assert gateway.calls == []
+
+
+async def test_unreachable_http_ref_fails_the_job(provider, gateway, monkeypatch):
+    async def boom(ref, **_):
+        raise httpx.ConnectError("no route", request=httpx.Request("GET", ref))
+    monkeypatch.setattr(mp, "to_data_url", boom)
+    job = ProviderJob(job_id="img5", kind=KIND_IMAGE, prompt="a fox",
+                      orientation="VERTICAL", reference_urls=("https://cdn.test/ref.png",))
+    result = await provider.run(job)
+    assert result["error"].startswith("muse2api: ")
+    assert gateway.calls == []
 
 
 async def test_video_sends_first_frame_inline_and_polls(provider, gateway, start_image):

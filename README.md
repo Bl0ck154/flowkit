@@ -405,9 +405,14 @@ gateway may run on another host), and downloads every result into
 so `/fk-refresh-urls` is never needed for it.
 
 Supports image and i2v; no edit, upscale or TTS, and no end frame or r2v unless
-`MUSE2API_ALLOW_DEGRADED=1`. Entity reference images are not sent (muse.ai takes
-none), so character consistency across scenes is weaker than on Flow.
-Troubleshooting lives in `/fk-provider` and `/fk-doctor`.
+`MUSE2API_ALLOW_DEGRADED=1`. Entity reference images are sent with each scene
+image (up to four, inline as data URLs; extra refs are dropped and logged), and
+a ref that cannot be read fails the job rather than rendering the scene without
+its character.
+
+If the gateway runs with billing enabled, every call is charged to the wallet of
+the key in `MUSE2API_KEY`. Use the admin key or a key marked `unlimited` for
+Flow Kit. Troubleshooting lives in `/fk-provider` and `/fk-doctor`.
 
 ### Post-production (provider-neutral)
 
