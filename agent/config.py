@@ -41,9 +41,13 @@ FLOW_GENERATION_MIN_INTERVAL_S = max(
 FLOW_GENERATION_MAX_CONCURRENT = max(
     1, int(os.environ.get("FLOW_GENERATION_MAX_CONCURRENT", "1"))
 )
+# After Google answers PUBLIC_ERROR_UNUSUAL_ACTIVITY, no generation is submitted
+# for this long. The hold is written to FLOW_GENERATION_HOLD_PATH so a restart
+# does not lift it (#67): retrying into the block may be what prolongs it.
 FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(
-    0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "120"))
+    0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "3600"))
 )
+FLOW_GENERATION_HOLD_PATH = BASE_DIR / "flow_generation_hold.json"
 FLOW_SESSION_PROJECT_IDLE_S = max(
     300.0, float(os.environ.get("FLOW_SESSION_PROJECT_IDLE_S", "7200"))
 )

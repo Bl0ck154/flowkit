@@ -201,19 +201,15 @@ async def extension_status():
 
 @router.post("/clear-hijack")
 async def clear_hijack_cooldown():
-    """Reset the generation cooldown triggered by extension_hijack_detected.
+    """Lift the generation hold (hijack or unusual-activity) by hand, including
+    the copy on disk.
 
-    Call this after deploying the bypass fix to immediately resume generation
-    without waiting for the cooldown to expire.
+    Only do this once the account generates normally in the Flow UI again:
+    submitting into an active unusual-activity block may prolong it.
     """
-    import time as _time
-    client = get_flow_client()
-    old_until = client._generation_unusual_until
-    client._generation_unusual_until = 0.0
-    was_active = old_until > 0.0 and old_until > _time.monotonic()
     return {
         "cleared": True,
-        "was_active": was_active,
+        "was_active": get_flow_client().clear_generation_hold(),
     }
 
 

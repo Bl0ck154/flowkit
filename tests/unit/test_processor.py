@@ -7,6 +7,7 @@ from agent.worker.processor import (
     _is_already_completed,
     _mark_scene_failed,
     _handle_failure,
+    HIJACK_MAX_RETRIES,
 )
 from agent.config import MAX_RETRIES
 
@@ -201,6 +202,38 @@ class TestHandleFailure:
         assert call_kwargs[1]["status"] == "FAILED"
         assert "retry_count" not in call_kwargs[1]
         mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_video_status="FAILED")
+
+    @pytest.mark.asyncio
+    async def test_bare_unusual_activity_code_is_not_retried(self):
+        req = make_req(retry_count=0)
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(req["id"], req, {"error": "UNUSUAL_ACTIVITY"})
+        assert mock_crud.update_request.call_args[1]["status"] == "FAILED"
+        assert "retry_count" not in mock_crud.update_request.call_args[1]
+
+    @pytest.mark.asyncio
+    async def test_hijack_is_retried_and_counted(self):
+        req = make_req(retry_count=0)
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(req["id"], req, {"error": "[HIJACK] extension_hijack_detected"})
+        kwargs = mock_crud.update_request.call_args[1]
+        assert kwargs["status"] == "PENDING" and kwargs["retry_count"] == 1
+        mock_crud.update_scene.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_hijack_fails_after_the_limit(self):
+        req = make_req(req_type="GENERATE_IMAGE", scene_id="scene-001",
+                       retry_count=HIJACK_MAX_RETRIES - 1)
+        with patch("agent.worker.processor.crud") as mock_crud:
+            mock_crud.update_request = AsyncMock()
+            mock_crud.update_scene = AsyncMock()
+            await _handle_failure(req["id"], req, {"error": "[HIJACK] extension_hijack_detected"})
+        assert mock_crud.update_request.call_args[1]["status"] == "FAILED"
+        mock_crud.update_scene.assert_awaited_once_with("scene-001", vertical_image_status="FAILED")
 
     @pytest.mark.asyncio
     async def test_extracts_error_message_from_nested_data(self):
