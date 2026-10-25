@@ -3,7 +3,7 @@
 muse2api exposes the muse.ai web app as an OpenAI-compatible API. Flow Kit
 only needs the media half of it:
 
-    POST /v1/images/generations   prompt -> image(s)   (synchronous)
+    POST /v1/images/generations   prompt (+ up to 4 refs) -> image   (synchronous)
     POST /v1/videos               prompt (+first frame) -> task
     GET  /v1/videos/{task_id}     task status; result.url when succeeded
     GET  /v1/media/{name}         download generated media (public)
@@ -38,6 +38,8 @@ from agent.utils.paths import file_url_to_path
 logger = logging.getLogger(__name__)
 
 TERMINAL_OK = "succeeded"
+#: The gateway's ``image`` field on /v1/images/generations takes up to four refs.
+MAX_IMAGE_REFS = 4
 TERMINAL_FAILED = ("failed", "cancelled")
 
 
@@ -142,11 +144,18 @@ class Muse2APIClient:
 
     # ── Images ──
 
-    async def generate_image(self, prompt: str, *, model: str, size: str | None) -> bytes:
-        """Generate one image and return its bytes (b64_json: no second download)."""
+    async def generate_image(self, prompt: str, *, model: str, size: str | None,
+                             images: list[str] | None = None) -> bytes:
+        """Generate one image and return its bytes (b64_json: no second download).
+
+        ``images`` are reference images as data URLs; the gateway attaches
+        them to the muse.ai chat and takes at most :data:`MAX_IMAGE_REFS`.
+        """
         body = {"prompt": prompt, "model": model, "n": 1, "response_format": "b64_json"}
         if size:
             body["size"] = size
+        if images:
+            body["image"] = images[:MAX_IMAGE_REFS]
         data = await self._request("POST", "/v1/images/generations",
                                    json=body, timeout=self.timeout_s)
         items = data.get("data") or []

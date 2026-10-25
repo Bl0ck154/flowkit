@@ -52,7 +52,8 @@ audio — it is rejected with 400.)
 - `assistant`: image, edit_image, i2v, r2v, **audio (TTS)**. No upscale.
 - `muse2api`: image, i2v. No edit_image, upscale or audio. No end frame and no
   r2v unless `MUSE2API_ALLOW_DEGRADED=1` (then both render as plain i2v).
-  Entity reference images are not sent — muse.ai takes none.
+  Entity reference images are sent with scene images (up to four; an
+  unreadable ref fails the job).
 
 Asking a provider for a kind it doesn't support returns 400 with a message
 naming the right backend to use instead.

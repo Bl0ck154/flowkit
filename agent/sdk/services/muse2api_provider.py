@@ -16,8 +16,8 @@ never expire, so ``/fk-refresh-urls`` has nothing to do for them.
 
 What muse.ai can and cannot do shapes the capabilities:
 
-* image         — text-to-image. Reference images are not an input the
-                  gateway accepts, so entity refs are dropped (logged).
+* image         — text-to-image, with up to four entity refs sent inline as
+                  data URLs (extra refs are dropped, logged).
 * video (i2v)   — first frame + prompt.
 * chained video — no end-frame input: fails unless MUSE2API_ALLOW_DEGRADED=1,
                   which drops the end frame and renders plain i2v.
@@ -34,6 +34,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import httpx
+
 from agent import config
 from agent.sdk.services.assistant_provider import _image_result, _video_result
 from agent.sdk.services.provider_base import (
@@ -44,7 +46,12 @@ from agent.sdk.services.provider_base import (
     ProviderCapabilities,
     ProviderJob,
 )
-from agent.services.muse2api_client import Muse2APIClient, Muse2APIError, to_data_url
+from agent.services.muse2api_client import (
+    MAX_IMAGE_REFS,
+    Muse2APIClient,
+    Muse2APIError,
+    to_data_url,
+)
 from agent.utils.paths import file_url_to_path
 
 logger = logging.getLogger(__name__)
@@ -113,8 +120,8 @@ class Muse2APIProvider(MediaProvider):
         except Muse2APIError as e:
             logger.error("muse2api: job %s (%s) failed: %s", job.job_id[:12], job.kind, e)
             return {"error": str(e)}
-        except (OSError, ValueError) as e:
-            # Unreadable input image, full disk, bad base64 …
+        except (OSError, ValueError, httpx.HTTPError) as e:
+            # Unreadable or unreachable input image, full disk, bad base64 …
             logger.error("muse2api: job %s (%s) failed: %s", job.job_id[:12], job.kind, e)
             return {"error": f"muse2api: {e}"}
         return {"error": f"muse2api provider does not support job kind '{job.kind}'"}
@@ -124,11 +131,17 @@ class Muse2APIProvider(MediaProvider):
         composition = (job.extra or {}).get("composition")
         if composition:
             prompt = f"{prompt}\n\nComposition: {composition}"
-        if job.reference_urls:
-            logger.info("muse2api: job %s — %d reference image(s) dropped, the "
-                        "gateway takes no image refs", job.job_id[:12], len(job.reference_urls))
+        refs = list(dict.fromkeys(job.reference_urls or []))
+        if len(refs) > MAX_IMAGE_REFS:
+            logger.warning("muse2api: job %s — %d reference images, the gateway takes "
+                           "%d; dropping the rest", job.job_id[:12], len(refs), MAX_IMAGE_REFS)
+            refs = refs[:MAX_IMAGE_REFS]
+        # An unreadable ref fails the job (OSError/ValueError in run()) rather
+        # than quietly rendering a scene without its character.
+        images = [await to_data_url(ref) for ref in refs]
         data = await self.client.generate_image(
-            prompt, model=config.MUSE2API_IMAGE_MODEL, size=_ASPECT.get(job.orientation))
+            prompt, model=config.MUSE2API_IMAGE_MODEL, size=_ASPECT.get(job.orientation),
+            images=images or None)
         url = await self._save(job.job_id, data, _image_ext(data))
         mid = str(uuid.uuid4())
         logger.info("muse2api: image %s ready (media_id=%s)", job.job_id[:12], mid[:8])
