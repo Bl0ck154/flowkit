@@ -273,6 +273,8 @@ extension are not needed for muse2api requests. Full setup:
 |---------|---------|--------------|
 | `FLOW_PROJECT_ID` | — | The Flow project every RPC is scoped to. Required. |
 | `FLOW_ALLOW_DEGRADED` | `0` | `1` lets scene chaining and r2v fall back to plain i2v instead of failing. |
+| `FLOW_GENERATION_MAX_CONCURRENT` / `FLOW_GENERATION_MIN_INTERVAL_S` | `1` / `3` | Every CAPTCHA-bearing Flow generation submit is serialised and spaced by at least this many seconds. |
+| `FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S` | `3600` | After Google answers `PUBLIC_ERROR_UNUSUAL_ACTIVITY`, no generation is submitted for this long. The hold is saved to `flow_generation_hold.json` and survives a restart; see [Account safety](#account-safety). |
 | `DEFAULT_PAYGATE_TIER` | `PAYGATE_TIER_TWO` | Carried for the DB and dashboard; no longer selects a model. |
 | `MEDIA_PROVIDER` | `flow` | `flow` (Google Flow via extension) or `assistant` (route all generation to the AI assistant). |
 | `ASSISTANT_PROVIDER_TIMEOUT_S` | `1800` | How long a request waits for a worker to complete its provider job before failing. |
@@ -447,9 +449,12 @@ fallback only runs when the extension is connected.
 
 ### Image API
 
-The migrated image path supports Nano Banana Pro, Nano Banana 2 and Nano Banana
-2 Lite, all five current aspect ratios, 1-4 outputs, true base-image editing and
-native 2K image export. Exact future Flow image model wire ids pass through
+The migrated image path supports Nano Banana Pro (`GEM_PIX_2`, the default),
+Nano Banana 2.1 (`BELUGA`, plus `BELUGA_THINKING_LOW/MED/HIGH`) and Nano Banana 2
+Lite (`HARBOR_SEAL`), all five current aspect ratios, 1-4 outputs, true
+base-image editing and native 2K image export. Nano Banana 2 (`NARWHAL`) answers
+`[5] NOT_FOUND` since October 2026, so the `NANO_BANANA_2` nickname now maps to
+`BELUGA`; switch with `/fk-change-model`. Exact future Flow image model wire ids pass through
 without being silently replaced by the default model. See
 [`docs/IMAGE_API.md`](docs/IMAGE_API.md).
 
@@ -915,11 +920,28 @@ drawtext` shows whether yours has it.
 - **Reference blocking** — scene image gen refuses if any referenced entity is missing `media_id`
 - **Skip completed** — won't re-generate already-completed assets
 - **Cascade clear** — regenerating image auto-resets downstream video + upscale
-- **Retry** — failed requests retry up to 5 times
+- **Retry** — failed requests retry up to 5 times, except the account-safety cases below
 - **UUID enforcement** — extracts UUID from fifeUrl if response doesn't provide it directly
 - **Voice context** — auto-appends character `voice_description` to video prompts
 - **No background music** — auto-appends "no background music, keep sound effects" to all video prompts
 - **Dual video response schema** — Lite/Fast/Ultra models return `operations[]` and stream URLs; Low Priority models (`veo_3_1_*_low_priority`, `*_ultra_relaxed`) return `workflows + media` with the MP4 inline as base64. The SDK auto-detects, validates the `ftyp` magic, and saves the binary to `output/_workflow_videos/{media_id}.mp4`. The scene's `_video_url` is then a `file://` path which `curl` and `ffmpeg` handle natively. `_video_media_id` always stores the real Flow media UUID, so upscale works for both schemas.
+
+### Account safety
+
+Some users reported Google accounts whose manual Flow UI generation was refused
+after FlowKit testing ([#67](https://github.com/crisng95/flowkit/issues/67)).
+Submitting more generations into a Google anti-abuse block may prolong it, so
+FlowKit stops instead of retrying:
+
+- **`PUBLIC_ERROR_UNUSUAL_ACTIVITY`** (any spelling) fails the request at once
+  and holds every further generation submit for `FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S`
+  (1 hour by default). The hold is written to `flow_generation_hold.json`, so
+  restarting the agent does not lift it. Media reads and polling keep working.
+- **`[HIJACK] extension_hijack_detected`** (the reCAPTCHA bypass failed) pauses
+  submits for 30s and is retried at most 3 times, then the request fails.
+- `GET /api/flow/status` → `generation_throttle` shows whether a hold is active,
+  its reason and the seconds left. `POST /api/flow/clear-hijack` lifts it by
+  hand — only do that once manual generation in the Flow UI works again.
 
 ### Default Model & Tier Compatibility
 
