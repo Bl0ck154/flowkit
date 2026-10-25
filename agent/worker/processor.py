@@ -20,6 +20,11 @@ from agent.sdk.services.result_handler import parse_result, apply_scene_result, 
 
 logger = logging.getLogger(__name__)
 
+# A failed captcha bypass gives up once the request's retry_count reaches this,
+# instead of retrying forever (#67). The count is shared with other retries,
+# which only makes it stop sooner.
+HIJACK_MAX_RETRIES = 3
+
 _API_CALL_TYPES = {"GENERATE_IMAGE", "REGENERATE_IMAGE", "EDIT_IMAGE",
                    "GENERATE_VIDEO", "REGENERATE_VIDEO", "GENERATE_VIDEO_REFS", "UPSCALE_VIDEO",
                    "GENERATE_CHARACTER_IMAGE", "REGENERATE_CHARACTER_IMAGE",
@@ -492,16 +497,20 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     error_lower = str(error_msg).lower()
 
     # [HIJACK] extension_hijack_detected — the captcha bypass failed and the
-    # token was poisoned by x2a. This is a system-level trap, NOT an account
-    # issue. Don't burn retry count — the bypass may succeed on the next
-    # attempt once the tab re-initializes.
+    # token was poisoned by x2a. The bypass may succeed once the tab
+    # re-initializes, but each retry is another submit Google can see, so
+    # give up after HIJACK_MAX_RETRIES (#67).
     if "[hijack]" in error_lower or "extension_hijack" in error_lower:
-        await crud.update_request(rid, status="PENDING", error_message=str(error_msg))
-        logger.error(
-            "Request %s [HIJACK] captcha bypass failed — will retry without "
-            "counting (system error, not account error): %s",
-            rid[:8], error_msg,
-        )
+        retry = req.get("retry_count", 0) + 1
+        if retry < HIJACK_MAX_RETRIES:
+            await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))
+            logger.error("Request %s [HIJACK] captcha bypass failed (retry %d/%d): %s",
+                         rid[:8], retry, HIJACK_MAX_RETRIES, error_msg)
+        else:
+            await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
+            await _mark_scene_failed(req)
+            logger.error("Request %s FAILED after %d [HIJACK] attempts: %s",
+                         rid[:8], retry, error_msg)
         return
 
     # PUBLIC_ERROR_UNUSUAL_ACTIVITY is a Google anti-abuse/session trust block,
@@ -509,7 +518,7 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
     # loop only creates more generation submits while Google is asking us to
     # slow down, so stop this request and require an explicit resubmit after
     # the session/network has recovered.
-    if "public_error_unusual_activity" in error_lower or "unusual activity" in error_lower:
+    if "unusual_activity" in error_lower or "unusual activity" in error_lower:
         await crud.update_request(rid, status="FAILED", error_message=str(error_msg))
         await _mark_scene_failed(req)
         logger.error("Request %s FAILED (Google unusual-activity block; manual recovery required): %s",
@@ -531,7 +540,7 @@ async def _handle_failure(rid: str, req: dict, result: dict, retry_after: dict =
         return
 
     # reCAPTCHA errors: retry up to 10 times — deferred dict in main loop handles delay
-    if "captcha" in error_lower or "recaptcha" in error_lower or "unusual_activity" in error_lower:
+    if "captcha" in error_lower or "recaptcha" in error_lower:
         retry = req.get("retry_count", 0) + 1
         if retry < 10:
             await crud.update_request(rid, status="PENDING", retry_count=retry, error_message=str(error_msg))

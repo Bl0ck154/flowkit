@@ -4,6 +4,8 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.db-journal
+flow_generation_hold.json
+flow_generation_hold.tmp
 .env
 output/
 youtube/channels/

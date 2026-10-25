@@ -29,7 +29,7 @@ from agent.config import (
     FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
-    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, FLOW_GENERATION_HOLD_PATH,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
@@ -72,6 +72,8 @@ class FlowClient:
         self._generation_unusual_until = 0.0
         self._generation_last_unusual_at: Optional[float] = None
         self._generation_last_unusual_rpc: Optional[str] = None
+        self._generation_hold_reason: Optional[str] = None
+        self._load_generation_hold()
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
@@ -204,12 +206,66 @@ class FlowClient:
     def connected(self) -> bool:
         return bool(self._extensions)
 
+    def _set_generation_hold(self, seconds: float, reason: str, rpcid: str) -> None:
+        """Stop generation submits for ``seconds`` and record it on disk, so a
+        restart keeps the hold. A longer hold already in place is kept, with
+        its reason."""
+        until = time.monotonic() + seconds
+        if until <= self._generation_unusual_until:
+            return
+        self._generation_unusual_until = until
+        self._generation_last_unusual_at = time.time()
+        self._generation_last_unusual_rpc = rpcid
+        self._generation_hold_reason = reason
+        tmp = FLOW_GENERATION_HOLD_PATH.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps({
+                "until": time.time() + seconds,
+                "reason": reason,
+                "rpc": rpcid,
+                "at": self._generation_last_unusual_at,
+            }))
+            tmp.replace(FLOW_GENERATION_HOLD_PATH)
+        except OSError as exc:
+            logger.warning("Could not persist the generation hold: %s", exc)
+
+    def _load_generation_hold(self) -> None:
+        try:
+            hold = json.loads(FLOW_GENERATION_HOLD_PATH.read_text())
+            remaining = float(hold["until"]) - time.time()
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Ignoring unreadable generation hold %s: %s",
+                           FLOW_GENERATION_HOLD_PATH, exc)
+            return
+        if remaining <= 0:
+            return
+        self._generation_unusual_until = time.monotonic() + remaining
+        self._generation_last_unusual_at = hold.get("at")
+        self._generation_last_unusual_rpc = hold.get("rpc")
+        self._generation_hold_reason = hold.get("reason")
+        logger.warning("Generation hold restored from disk (%s): %.0fs left",
+                       self._generation_hold_reason, remaining)
+
+    def clear_generation_hold(self) -> bool:
+        """Lift the hold by hand. Returns whether one was active."""
+        was_active = self._generation_unusual_until > time.monotonic()
+        self._generation_unusual_until = 0.0
+        self._generation_hold_reason = None
+        try:
+            FLOW_GENERATION_HOLD_PATH.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove the generation hold file: %s", exc)
+        return was_active
+
     @property
     def generation_guard_status(self) -> dict:
         remaining = max(0.0, self._generation_unusual_until - time.monotonic())
         return {
             "cooldown_active": remaining > 0,
             "cooldown_remaining_s": round(remaining, 3),
+            "cooldown_reason": self._generation_hold_reason if remaining > 0 else None,
             "last_unusual_activity_at": self._generation_last_unusual_at,
             "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
         }
@@ -567,13 +623,9 @@ class FlowClient:
                 # x2a trap: the token was poisoned with action
                 # "extension_hijack_detected". This is a system-level trap,
                 # NOT an account issue — don't apply the long cooldown.
-                # Short pause lets the bypass re-initialise on next tab.
-                self._generation_unusual_until = max(
-                    self._generation_unusual_until,
-                    time.monotonic() + 30.0,
-                )
-                self._generation_last_unusual_at = time.time()
-                self._generation_last_unusual_rpc = rpcid
+                # Short pause lets the bypass re-initialise on next tab; the
+                # worker gives up on the request after a few of these.
+                self._set_generation_hold(30.0, "extension_hijack_detected", rpcid)
                 logger.error(
                     "[HIJACK] extension_hijack_detected — captcha bypass may "
                     "have failed; pausing generation submits for 30s"
@@ -584,12 +636,9 @@ class FlowClient:
                 else:
                     result["error"] = "[HIJACK] extension_hijack_detected"
             elif is_unusual:
-                self._generation_unusual_until = max(
-                    self._generation_unusual_until,
-                    time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+                self._set_generation_hold(
+                    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, "unusual_activity", rpcid,
                 )
-                self._generation_last_unusual_at = time.time()
-                self._generation_last_unusual_rpc = rpcid
                 logger.warning(
                     "Google unusual-activity block detected; pausing generation submits for %.0fs",
                     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,

@@ -164,3 +164,11 @@ async def test_db(tmp_path, monkeypatch):
     yield tmp_path / "test.db"
     await schema.close_db()
     schema._db_connection = None
+
+
+@pytest.fixture(autouse=True)
+def _generation_hold_path(tmp_path, monkeypatch):
+    """Keep FlowClient's persisted generation hold out of the real agent dir."""
+    path = tmp_path / "flow_generation_hold.json"
+    monkeypatch.setattr("agent.services.flow_client.FLOW_GENERATION_HOLD_PATH", path)
+    return path
