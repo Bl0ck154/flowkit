@@ -96,6 +96,7 @@ class UpscaleVideoRequest(BaseModel):
     scene_id: str
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     resolution: str = "VIDEO_RESOLUTION_4K"
+    project_id: Optional[str] = None
 
 
 class UploadImageRequest(BaseModel):
@@ -181,6 +182,8 @@ async def extension_status():
     authenticates in the page and there is no bearer token to capture.
     """
     client = get_flow_client()
+    session = await inspect_flow_session() if client.connected else {}
+    signed_in = bool(session.get("signedIn")) if isinstance(session, dict) else False
     return {
         "connected": client.connected,
         # One transport now. The key stays so the documented pre-flight check
@@ -188,6 +191,11 @@ async def extension_status():
         "transport": "batch",
         "flow_project_id": FLOW_PROJECT_ID or None,
         "allow_degraded": FLOW_ALLOW_DEGRADED,
+        "authenticated": signed_in,
+        "auth_state": "AUTHENTICATED" if signed_in else session.get("state", "UNKNOWN"),
+        "flow_tab_present": bool(session.get("flowTabPresent")),
+        "at_token_present": bool(session.get("atTokenPresent")),
+        "session_url": session.get("url"),
         "flow_key_present": client._flow_key is not None,
         "generation_throttle": {
             "min_interval_s": FLOW_GENERATION_MIN_INTERVAL_S,
@@ -213,16 +221,49 @@ async def clear_hijack_cooldown():
     }
 
 
-@router.get("/credits")
-async def get_credits():
-    """Get user credits from Google Flow."""
+@router.post("/ensure-session")
+async def ensure_session():
+    """Reopen/reload Flow in the persistent Google profile and re-check login."""
     client = get_flow_client()
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
-    result = await client.get_credits()
+    session = await ensure_flow_session()
+    return {
+        "authenticated": bool(session.get("signedIn")),
+        "auth_state": session.get("state", "UNKNOWN"),
+        "recovered": bool(session.get("recovered")),
+        "flow_tab_present": bool(session.get("flowTabPresent")),
+        "at_token_present": bool(session.get("atTokenPresent")),
+        "session_url": session.get("url"),
+        "interactive_login_required": session.get("state") == "INTERACTIVE_LOGIN_REQUIRED",
+    }
+
+
+@router.get("/account")
+async def get_account():
+    """Return the signed-in Flow Google account name/email, never auth secrets."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    return await inspect_google_account()
+
+
+@router.get("/credits")
+async def get_credits(refresh: bool = False):
+    """Get the real visible Google Flow credit balance."""
+    client = get_flow_client()
+    if not client.connected:
+        raise HTTPException(503, "Extension not connected")
+    result = await client.get_credits(refresh=refresh)
     if result.get("error"):
         raise HTTPException(502, result["error"])
     return result.get("data", result)
+
+
+@router.get("/image-capabilities")
+async def get_image_capabilities(refresh: bool = False):
+    """List current image models, aspect ratios, count and upscale targets."""
+    return await image_capabilities(refresh=refresh)
 
 
 @router.post("/generate-image")

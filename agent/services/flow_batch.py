@@ -34,6 +34,7 @@ from typing import Any, Optional
 BATCH_PATH = "/_/AiSandboxAngularFrontend/data/batchexecute"
 MEDIA_HOST = "flow-content.google"
 
+RPC_CREATE_PROJECT = "jHPbke"
 RPC_GEN_IMAGE = "ogiZ0b"
 RPC_GEN_VIDEO = "eb1hJf"
 RPC_GEN_VIDEO_TEXT = "YhhmEf"
@@ -45,6 +46,7 @@ RPC_PROJECT_MEDIA = "Zzl0ze"
 RPC_MEDIA = "as29s"
 RPC_UPLOAD_IMAGE = "maseQ"
 RPC_UPSCALE_IMAGE = "SPrCad"
+RPC_UPSCALE = "p0UkFb"
 
 CAPTCHA_IMAGE = "IMAGE_GENERATION"
 CAPTCHA_VIDEO = "VIDEO_GENERATION"
@@ -105,6 +107,18 @@ ASPECT_BY_NAME = {
     "3:4": ASPECT_PORTRAIT_4_3,
     "4:3": ASPECT_LANDSCAPE_4_3,
 }
+
+IMAGE_ASPECTS = {
+    "1:1": ("IMAGE_ASPECT_RATIO_SQUARE", ASPECT_SQUARE, (1024, 1024)),
+    "9:16": ("IMAGE_ASPECT_RATIO_PORTRAIT", ASPECT_PORTRAIT, (768, 1376)),
+    "16:9": ("IMAGE_ASPECT_RATIO_LANDSCAPE", ASPECT_LANDSCAPE, (1376, 768)),
+    "3:4": ("IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR", ASPECT_PORTRAIT_4_3, (896, 1200)),
+    "4:3": ("IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE", ASPECT_LANDSCAPE_4_3, (1200, 896)),
+}
+
+REF_TYPE_IMAGE = 1
+BASE_TYPE_IMAGE = 2
+IMAGE_UPSCALE_RESOLUTIONS = {"2K": 1, "4K": 2}
 
 #: Video models this path accepts. The REST-era map was keyed by
 #: [tier][quality][aspect] and carried `…_portrait` / `…_fl` / `…_relaxed`
@@ -413,6 +427,23 @@ def stream_chat_request(prompt: str, project_id: str, client_uuid: str | None = 
     return json.dumps([None, json.dumps(inner, separators=(",", ":"), ensure_ascii=False)], separators=(",", ":"), ensure_ascii=False)
 
 
+def upscale_request(media_id: str, project_id: str,
+                    aspect: Any = VIDEO_ASPECT_LANDSCAPE,
+                    model: str = "veo_3_1_upsampler_1080p") -> str:
+    """Build Flow's migrated high-resolution download request (RPC p0UkFb)."""
+    item = [None] * 32
+    item[0] = [None, media_id]
+    item[2] = 1
+    item[4] = [None, str(uuid.uuid4()), None, None, _client_uuid()]
+    item[6] = resolve_video_aspect(aspect)
+    item[31] = model
+    return build_envelope(RPC_UPSCALE, [
+        [item],
+        _context(project_id),
+        [_client_uuid()],
+    ])
+
+
 def image_upscale_request(media_id: str, resolution: str = "2K") -> str:
     """Build the current FlowService.UpsampleImage request (RPC SPrCad)."""
     key = str(resolution).strip().upper()
@@ -687,6 +718,14 @@ def read_upscaled_image(payload: Any) -> str:
     return encoded
 
 
+def read_upscaled_media_id(payload: Any) -> str:
+    """Return the media id created by the p0UkFb upscale submit."""
+    for text in _walk_strings(payload):
+        if isinstance(text, str) and text.endswith("_upsampled"):
+            return text
+    raise FlowBatchError("upscale response carried no upsampled media id")
+
+
 def read_operation(payload: Any) -> Operation:
     """`[null, 50, [[opId, projectId, sceneId, status, …]]]`.
 
@@ -766,6 +805,24 @@ def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
     window_end = min(len(text), start + 800)
     match = _MEDIA_SLOT.search(text, window_start, window_end)
     return match.group(1) if match else None
+
+
+_PICKER_ASB_URL = re.compile(r'https://lh3\.googleusercontent\.com/asb/[^"\\]+')
+
+
+def find_picker_asb_url_in_text(text: str, media_id: str) -> Optional[str]:
+    """Return the picker thumbnail URL from a media-detail listing window.
+
+    ``Zzl0ze`` contains each media id twice: first in a lightweight project
+    metadata row, then in the detailed media record that carries the ``/asb/``
+    thumbnail used by Flow's asset picker. Callers should request a window
+    around the *last* occurrence of ``media_id``.
+    """
+    start = text.find(media_id)
+    if start == -1:
+        return None
+    match = _PICKER_ASB_URL.search(text, start, start + 800)
+    return match.group(0) if match else None
 
 
 def read_media_urls(payload: Any, media_id: str) -> MediaUrls:

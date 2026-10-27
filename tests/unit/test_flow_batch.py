@@ -290,7 +290,7 @@ class TestReaders:
     def test_the_media_id_is_found_in_an_unparsable_listing(self):
         """The listing outgrows any response cap; a truncated tail still holds
         the entry we came for."""
-        text = f'["{self.OP}",null,null,["title",1,2,null,null,"{self.MID}"],"proj' 
+        text = f'["{self.OP}",null,null,["title",1,2,null,null,"{self.MID}"],"proj'
         assert fb.find_media_id_in_text(text, self.OP) == self.MID
 
     def test_an_absent_operation_reads_as_not_there_yet(self):

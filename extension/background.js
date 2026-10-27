@@ -14,7 +14,7 @@
  * serving an older one; remove them once no agent in the wild sends them.
  */
 
-const AGENT_WS_URL = 'ws://127.0.0.1:9222';
+const AGENT_WS_URL = 'ws://127.0.0.1:9223';
 // NOTE: This is a browser-restricted public API key — safe to ship in extension bundles.
 const API_KEY = 'AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY';
 

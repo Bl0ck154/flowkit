@@ -1,40 +1,41 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"/></a>
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white" alt="Python 3.10+"/>
-  <img src="https://img.shields.io/badge/Chrome-MV3-4285F4?logo=googlechrome&logoColor=white" alt="Chrome MV3"/>
-  <img src="https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white" alt="FastAPI"/>
-  <img src="https://img.shields.io/badge/ffmpeg-required-007808?logo=ffmpeg&logoColor=white" alt="ffmpeg"/>
-  <a href="CLAUDE.md"><img src="https://img.shields.io/badge/Docs-CLAUDE.md-8A2BE2" alt="Documentation"/></a>
-  <a href="https://github.com/tuannguyenhoangit-droid/google-flow-agent/stargazers"><img src="https://img.shields.io/github/stars/tuannguyenhoangit-droid/google-flow-agent?style=flat&logo=github" alt="GitHub stars"/></a>
-  <a href="https://github.com/tuannguyenhoangit-droid/google-flow-agent/issues"><img src="https://img.shields.io/github/issues/tuannguyenhoangit-droid/google-flow-agent?logo=github" alt="GitHub issues"/></a>
-  <a href="https://deepwiki.com/tuannguyenhoangit-droid/google-flow-agent"><img src="https://img.shields.io/badge/DeepWiki-AI%20Docs-6A3BC9" alt="DeepWiki"/></a>
+  <img src="https://img.shields.io/badge/FastAPI-self--hosted-009688?logo=fastapi&logoColor=white" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/Google%20Flow-live%20tested-4285F4?logo=googlechrome&logoColor=white" alt="Google Flow live tested"/>
 </p>
 
----
+> [!IMPORTANT]
+> This is an **actively maintained fork of [crisng95/flowkit](https://github.com/crisng95/flowkit)** focused on keeping the Google Flow integration working against live frontend/API changes and making Flow practical as a self-hosted server API. Upstream remains the original project and receives compatible fixes through pull requests when possible.
 
-> **Working against the new Google Flow API.** Flow moved to `flow.google.com`
-> in September 2026 and stopped minting the `Bearer ya29.…` that the old
-> `aisandbox-pa.googleapis.com` REST API needed. The `batchexecute` transport
-> that replaces it is in place and verified end to end against the live API —
-> image generation, 2K image export, and image-to-video all run green. Upgrading
-> from an older Flow Kit: reload the extension (v0.3.2+) and pin
-> `FLOW_PROJECT_ID`; Flow Kit can no longer create the project for you.
+> **Current Flow integration.** Google Flow moved generation to signed-in
+> `flow.google.com` batchexecute requests in September 2026. This fork keeps
+> server-facing API compatibility while adapting to the browser transport.
+> Project-less API requests use a session-project lease; pinning
+> `FLOW_PROJECT_ID` is optional for legacy/internal callers.
 >
-> Every Omni 1.1 Flash video mode is ported and live-verified: text-to-video,
-> first frame, first+last frame, and references. Three capabilities remain
-> unported on the **Veo** path because their payloads were never captured off
-> the new UI — **video upscale**, **Veo reference-to-video**, and **Veo
-> start+end-frame chaining**. They fail loudly with `UNSUPPORTED_ON_BATCH_API`
-> instead of quietly producing the wrong thing. For the latter two, Omni covers
-> the same shot with `model_family=omni_flash`, or `FLOW_ALLOW_DEGRADED=1` drops
-> them to plain i2v; video upscale has no fallback. To restore one properly see
-> [`docs/CAPTURE.md`](docs/CAPTURE.md).
+> **Video export:** Native 1080p export uses `p0UkFb` with
+> `veo_3_1_upsampler_1080p`. This path was previously live-verified by the fork,
+> but must be smoke-tested again after upgrading the integrated code.
+> 4K availability depends on the account and has not been re-verified.
+> Veo reference-to-video and first+last-frame chaining remain unsupported
+> unless a compatible live payload is confirmed (Omni Flash supports these modes).
+> Image model nicknames track upstream changes, including BELUGA for
+> Nano Banana 2.1; explicit wire model IDs remain available.
 
----
+- **live compatibility fixes** based on current `flow.google.com` behavior;
+- **self-hosted FastAPI endpoints** for server-side apps, bots and agents;
+- automatic Flow project creation and short-lived session projects — no permanent `FLOW_PROJECT_ID` pin required;
+- Nano Banana image generation, editing and export;
+- Omni Flash text-to-video, first-frame, first+last-frame and reference-image video modes;
+- Veo image-to-video support;
+- real Flow credit balance / generation-cost metadata;
+- persistent signed-in Chrome profile with automatic Flow tab recovery;
+- generation throttling and circuit-breaker behavior for Google risk / unusual-activity responses;
+- caller attribution and diagnostics for production integrations;
+- regression tests built from live Flow request captures.
 
-# FLOW KIT
-
-Standalone system to generate AI videos via Google Flow. Uses a Chrome extension as a browser bridge: it mints reCAPTCHA and runs Flow's batchexecute RPCs inside a signed-in `flow.google.com` tab, which is the only place they can be signed.
+The goal is simple: **when Flow changes, fix the integration quickly and upstream the reusable parts.**
 
 ## AI Agent Support
 
@@ -61,7 +62,23 @@ agent can read and follow. Review providers are swappable at runtime
 
 ## Showcase
 
-All outputs below were generated end-to-end by this system — from story concept to final YouTube-ready video with thumbnails, narration, and branding.
+| Capability | Status |
+|---|---|
+| Nano Banana Pro image generation | ✅ Live tested |
+| Nano Banana 2 image generation | ✅ Live tested |
+| Nano Banana 2 Lite wire support | ✅ Supported |
+| Image references / base-image editing | ✅ Supported |
+| Image export | ✅ 2K; 4K where the account/plan allows it |
+| Omni Flash text-to-video | ✅ 4 / 6 / 8 / 10 s, 360p / 720p |
+| Omni Flash first-frame video | ✅ Live tested |
+| Omni Flash first + last frame | ✅ Supported |
+| Omni Flash reference / ingredients video | ✅ Supported |
+| Veo image-to-video | ✅ Supported |
+| Video export / upscale | ✅ 1080p; higher modes depend on Flow/account support |
+| Flow project creation | ✅ Automatic |
+| Session-scoped projects | ✅ Automatic rotation after idle period |
+| Account / credit inspection | ✅ Supported |
+| Server REST API | ✅ FastAPI |
 
 ### Full Video Demos
 
@@ -94,7 +111,7 @@ All outputs below were generated end-to-end by this system — from story concep
   <img src="docs/images/thumbnail_iran_israel.jpg" width="400" alt="Iran vs Israel conflict thumbnail" />
 </p>
 
-### Visual Consistency Across Scenes
+FlowKit runs a local/server FastAPI service next to a persistent Chrome session signed into Google Flow.
 
 The reference image system keeps characters consistent across an entire video. Each character is generated once as a reference, then the AI uses that reference in every scene — maintaining the same face, clothing, and features.
 
@@ -205,10 +222,7 @@ A local React dashboard (`dashboard/`) for monitoring and driving the pipeline �
 └──────────────────┘                    └──────────────────────┘     └──────────────────┘
 ```
 
-Flow signs every call with the session cookie plus a per-page `at` token, and a
-generate also carries a single-use reCAPTCHA. None of that can be replayed from
-outside the browser, so the agent builds the request and the **page** issues it.
-One signed-in Flow tab has to stay open; nothing here works headless.
+The browser keeps the authenticated Flow session and page state. FlowKit turns that into a usable local/server API for other software.
 
 > **September 2026 — Flow moved.** It now lives at `flow.google.com` and the old
 > `aisandbox-pa.googleapis.com` REST API has no caller: the `Bearer ya29.…` it
@@ -217,48 +231,62 @@ One signed-in Flow tab has to stay open; nothing here works headless.
 > [Configuration](#configuration). The REST path has been removed; `git log`
 > has it if a payload is ever needed for reference.
 
-## Quick Start
+### 1. Clone this maintained fork
 
-### One-command setup
+```bash
+git clone https://github.com/Bl0ck154/flowkit.git
+cd flowkit
+```
+
+### 2. Install
 
 ```bash
 ./setup.sh
 ```
 
-This checks and installs: Python 3.10+, pip, ffmpeg, ffprobe, Chrome, creates venv, installs dependencies, verifies imports.
-
-> **Windows:** Use [WSL](https://learn.microsoft.com/en-us/windows/wsl/install) (`wsl --install`) or Git Bash. All bash scripts and commands assume a Unix shell.
-
-### Manual setup
+Or install the Python dependencies manually:
 
 ```bash
-# Prerequisites: Python 3.10+, ffmpeg, Chrome
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Run
+You also need Chrome/Chromium and `ffmpeg` for the full media pipeline.
 
-```bash
-# 1. Load Chrome extension: chrome://extensions → Developer mode → Load unpacked → extension/
-# 2. Open https://flow.google.com/ and sign in — leave the tab open
-# 3. Create a project in the Flow UI and copy its uuid out of the URL
-export FLOW_PROJECT_ID=<that uuid>
+### 3. Load the Chrome extension
 
-# 4. Start agent
-source venv/bin/activate   # if using setup.sh
-python -m agent.main
+Open:
 
-# 5. Verify
-curl http://127.0.0.1:8100/health
-# {"status":"ok","extension_connected":true}
-curl http://127.0.0.1:8100/api/flow/status
-# {"connected":true,"transport":"batch","flow_project_id":"…","flow_key_present":false}
+```text
+chrome://extensions
 ```
 
-`flow_key_present: false` is expected — the current transport has no bearer
-token. Step 3 is not optional: Flow's project-creation endpoint went with the
-migration, so without a pinned project every request fails `NO_FLOW_PROJECT`.
-You can also pass `flow_project_id` per project on `POST /api/projects`.
+Enable **Developer mode** → **Load unpacked** → select `extension/`.
+
+Then open `https://flow.google.com/` and sign in to the Google account you want FlowKit to use.
+
+### 4. Start FlowKit
+
+```bash
+source venv/bin/activate
+python -m agent.main
+```
+
+Default API:
+
+```text
+http://127.0.0.1:8100
+```
+
+Check it:
+
+```bash
+curl http://127.0.0.1:8100/health
+curl http://127.0.0.1:8100/api/flow/status
+```
+
+You **do not need to manually pin one permanent Flow project** for normal direct API usage. FlowKit can create and rotate session projects itself, while callers can still explicitly reuse an existing `project_id` when they need long-lived project context.
 
 **Using the Muse provider (`muse2api`)?** It needs a second service: the
 [muse2api](https://github.com/crisng95/muse2api) gateway, cloned from its own
@@ -552,88 +580,42 @@ From the story, identify every visual element that repeats across scenes:
 | Golden Fish | `visual_asset` | Golden koi, shimmering scales, magical glow |
 
 ```bash
-curl -X POST http://127.0.0.1:8100/api/projects \
-  -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8100/api/flow/generate-image \
+  -H 'Content-Type: application/json' \
   -d '{
-    "name": "Pippip the Fish Merchant",
-    "story": "Pippip is a chubby orange tabby cat who sells fish at a Southeast Asian open market. Scene 1: Morning setup. Scene 2: Staring at the golden fish. Scene 3: Eating the last fish at sunset.",
-    "characters": [
-      {"name": "Pippip", "entity_type": "character", "description": "Chubby orange tabby cat with big green eyes, blue apron, straw hat. Walks upright. Pixar-style 3D."},
-      {"name": "Fish Stall", "entity_type": "location", "description": "Small rustic wooden market stall with thatched bamboo roof, crushed ice display, hanging brass scale."},
-      {"name": "Open Market", "entity_type": "location", "description": "Bustling Southeast Asian open-air market with colorful awnings, hanging lanterns, stone walkway."},
-      {"name": "Golden Fish", "entity_type": "visual_asset", "description": "Magnificent golden koi fish with shimmering iridescent scales, elegant fins, slight magical glow."}
-    ]
+    "prompt": "cinematic product photo of a red ceramic mug on a white table",
+    "image_model": "NANO_BANANA_2",
+    "aspect_ratio": "IMAGE_ASPECT_RATIO_LANDSCAPE",
+    "count": 1
   }'
-# Save project_id from response
 ```
 
-#### Step 2: Create video + scenes
+Available configured image families include:
 
-Scene prompts reference entities by **name** (not description). `character_names` lists which reference images to apply.
+```text
+NANO_BANANA_PRO
+NANO_BANANA_2
+NANO_BANANA_2_LITE
+```
+
+See [`docs/IMAGE_API.md`](docs/IMAGE_API.md) for image references, editing, aspect ratios and export.
+
+### Omni Flash text-to-video
 
 ```bash
-# Create video
-curl -X POST http://127.0.0.1:8100/api/videos \
-  -H "Content-Type: application/json" \
-  -d '{"project_id": "<PID>", "title": "Pippip Episode 1"}'
-
-# Scene 1 (ROOT) — Pippip + Fish Stall + Open Market appear
-curl -X POST http://127.0.0.1:8100/api/scenes \
-  -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8100/api/flow/generate-video-omni-text \
+  -H 'Content-Type: application/json' \
   -d '{
-    "video_id": "<VID>", "display_order": 0,
-    "prompt": "Pippip stands behind Fish Stall, arranging fresh fish on ice. Sunrise, golden light in Open Market. Pixar 3D.",
-    "character_names": ["Pippip", "Fish Stall", "Open Market"],
-    "chain_type": "ROOT"
-  }'
-
-# Scene 2 (CONTINUATION) — Golden Fish now appears
-curl -X POST http://127.0.0.1:8100/api/scenes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_id": "<VID>", "display_order": 1,
-    "prompt": "Pippip leans over Fish Stall, staring at Golden Fish on empty ice. Drooling. Open Market dark behind. Pixar 3D.",
-    "character_names": ["Pippip", "Fish Stall", "Golden Fish", "Open Market"],
-    "chain_type": "CONTINUATION", "parent_scene_id": "<scene-1-id>"
-  }'
-
-# Scene 3 (CONTINUATION)
-curl -X POST http://127.0.0.1:8100/api/scenes \
-  -H "Content-Type: application/json" \
-  -d '{
-    "video_id": "<VID>", "display_order": 2,
-    "prompt": "Pippip sits on stool at Fish Stall eating Golden Fish with chopsticks. SOLD OUT sign. Open Market sunset. Pixar 3D.",
-    "character_names": ["Pippip", "Fish Stall", "Golden Fish", "Open Market"],
-    "chain_type": "CONTINUATION", "parent_scene_id": "<scene-2-id>"
+    "prompt": "slow cinematic camera push toward a coffee cup by a rainy window",
+    "duration_s": 4,
+    "resolution": "360p",
+    "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE"
   }'
 ```
 
-#### Step 3-6: Generate refs → images → videos → concat
+### Upload an image
 
-```bash
-# Step 3: Generate reference images (one per entity, wait for each)
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_CHARACTER_IMAGE", "character_id": "<CID>", "project_id": "<PID>"}'
-# Poll: GET /api/requests/<RID> until status=COMPLETED
-# Repeat for each entity. Verify all have UUID media_id.
-
-# Step 4: Generate scene images
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_IMAGE", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"}'
-# Worker blocks if any ref is missing media_id
-
-# Step 5: Generate videos (2-5 min each)
-curl -X POST http://127.0.0.1:8100/api/requests \
-  -d '{"type": "GENERATE_VIDEO", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "VERTICAL"}'
-
-# Step 6: Download + concat
-curl -s "http://127.0.0.1:8100/api/scenes?video_id=<VID>"  # get video URLs
-# Download each, normalize with ffmpeg, concat
-```
-
-</details>
-
----
+For **external/API callers**, send the image bytes directly. Do not pass a path from the caller's filesystem: `flowkit-agent.service` runs as its own `flowkit` user and uses systemd isolation such as `PrivateTmp=yes`, so caller-local `/tmp/...`, `/root/...` and other protected paths may not exist or be readable inside the service.
 
 ## Core Concepts
 
@@ -954,17 +936,14 @@ The `*_ultra_relaxed` family (Low Priority ultra-quality) silently returns empty
 Every project must have a `material` field that controls the visual style of generated images. Set it at project creation.
 
 ```bash
-# List available materials
-curl -s http://127.0.0.1:8100/api/materials
-
-# Set on project
-curl -X POST http://127.0.0.1:8100/api/projects \
-  -d '{"name": "...", "material": "3d_pixar", ...}'
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image-file \
+  -F 'file=@./source.jpg;type=image/jpeg' \
+  -F 'project_id=YOUR_FLOW_PROJECT_ID'
 ```
 
-Materials control both entity `image_prompt` style and scene `scene_prefix`. Examples: `realistic`, `3d_pixar`, `anime`, `stop_motion`, `minecraft`, `oil_painting`.
+If `project_id` is omitted, FlowKit automatically uses/creates the current session project.
 
-## Configuration
+#### JSON/base64 upload
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -1025,72 +1004,68 @@ Optional narrator voice for scenes. Uses [OmniVoice](https://github.com/tuannguy
 See `skills/fk-gen-tts-template.md` for full install guide. Quick version:
 
 ```bash
-pip install torch==2.8.0 torchaudio==2.8.0   # or +cu128 for NVIDIA
-pip install omnivoice
-python3 -c "from omnivoice import OmniVoice; print('OK')"
+IMAGE_B64="$(base64 -w0 ./source.jpg)"
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image \
+  -H 'Content-Type: application/json' \
+  -d "{\"image_base64\":\"$IMAGE_B64\",\"mime_type\":\"image/jpeg\",\"file_name\":\"source.jpg\"}"
 ```
 
-If OmniVoice is in a separate venv, point to it:
-```bash
-export TTS_PYTHON_BIN=/path/to/omnivoice-venv/bin/python3
-```
+Base64 is supported for compatibility and JSON-only clients, but expands the request by roughly one third compared with multipart.
 
-### Workflow
+#### Server-local `file_path` mode
 
-1. **Create voice template** — `/fk-gen-tts-template` — generates an anchor voice WAV
-2. **Add narrator text** to scenes — `PATCH /api/scenes/{id}` with `narrator_text`
-3. **Generate narration** — `/fk-gen-narrator` — voice-clones the template for each scene
-4. **Concat with narration** — `/fk-concat-fit-narrator` — trims scene videos to match TTS duration
-
-CPU-only recommended (MPS produces artifacts). ~15-30s per scene.
-
-## YouTube Upload Pipeline
-
-Automated upload with per-channel rules, SEO optimization, and brand watermarking.
-
-### Setup
+`file_path` remains available as a convenience **only when the image already exists on the FlowKit server** and is readable by the `flowkit` service user:
 
 ```bash
-# 1. Place OAuth credentials
-cp client_secrets.json youtube/channels/<channel_name>/
-
-# 2. Authenticate (opens browser)
-python3 youtube/auth.py <channel_name>              # Linux / Windows (WSL)
-arch -arm64 python3 youtube/auth.py <channel_name>  # macOS Apple Silicon
-
-# 3. Token saved to youtube/channels/<channel_name>/token.json (auto-refreshes)
+curl -X POST http://127.0.0.1:8100/api/flow/upload-image \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_path": "/var/lib/flowkit/imports/source.jpg",
+    "file_name": "source.jpg"
+  }'
 ```
 
-### Channel Rules (`channel_rules.json`)
+Do not use caller-local `/tmp/...` paths for this mode. With systemd `PrivateTmp=yes`, the FlowKit service sees a different `/tmp` namespace. Unreadable paths return a clear 403, and paths not visible in the service namespace return a descriptive 404 instead of an internal traceback.
 
-Each channel has a rules file controlling upload scheduling and SEO:
+The response contains a Flow `media_id` and the resolved `project_id`, both of which can be reused for later generation.
 
-```json
-{
-  "shorts": {"max_per_day": 3, "optimal_times": ["07:00", "12:00", "17:00"]},
-  "long_form": {"max_per_day": 1, "optimal_times": ["19:00"]},
-  "scheduling": {"min_gap_hours": 4, "avoid_hours": [0,1,2,3,4,5]},
-  "seo": {"niche": "...", "default_tags": [...], "title_max_chars": 65}
-}
+### Image-to-video with Omni Flash
+
+```bash
+curl -X POST http://127.0.0.1:8100/api/flow/generate-video \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "start_image_media_id": "YOUR_MEDIA_ID",
+    "scene_id": "demo-scene",
+    "prompt": "slow camera pan, natural subtle motion",
+    "model_family": "omni_flash",
+    "duration_s": 4,
+    "resolution": "360p",
+    "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE"
+  }'
 ```
 
-### Skill Chain
+For first+last frame and multi-reference / Ingredients modes, see [`docs/OMNI_FLASH.md`](docs/OMNI_FLASH.md).
 
+### Read the active Google account
+
+```bash
+curl http://127.0.0.1:8100/api/flow/account
 ```
-/fk-youtube-seo    → generates title, description, hashtags, tags
-/fk-brand-logo     → applies channel icon watermark
-/fk-youtube-upload  → validates rules + uploads (auto-detects Short vs Long-form)
+
+### Read Flow credits
+
+```bash
+curl http://127.0.0.1:8100/api/flow/credits
 ```
 
-Upload validation checks: max per day, min gap between uploads, avoid dead hours. Auto-detects Short (<61s + vertical 9:16) vs Long-form.
+Force a visible Flow balance refresh:
 
-## Error Handling
+```bash
+curl 'http://127.0.0.1:8100/api/flow/credits?refresh=true'
+```
 
-Errors can originate from four layers — Google Flow backend, Chrome extension, FastAPI layer, and the worker itself. The worker's `_handle_failure` (`agent/worker/processor.py:414-481`) routes recovery by **`error_message` string content, not HTTP status**, because Flow lumps many distinct failures under HTTP 400 with varying `details.reason` values.
-
-### Flow-Native Structured Errors
-
-These arrive in the response body as `data.error.details[].reason`. The worker appends the reason to `error_message` as `"<msg> [<reason>]"`.
+Generation responses can also include the current balance, estimated generation cost and estimated remaining balance.
 
 | Reason string | Meaning | Auto-handling |
 |---------------|---------|---------------|
@@ -1102,7 +1077,7 @@ These arrive in the response body as `data.error.details[].reason`. The worker a
 | `reCAPTCHA failed` / `captcha` | Extension couldn't solve CAPTCHA | Retry up to 10× without incrementing `retry_count` (processor.py:454-464) |
 | `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually rapid bursts of submits, VPN/shared IP, or stale auth cookies | NOT auto-recoverable. Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in at `flow.google.com`, then resubmit with ≥1s gap and ≤5 concurrent. See `/fk-doctor` for full playbook. |
 
-### HTTP Status Codes
+Older FlowKit versions commonly relied on one permanently pinned `FLOW_PROJECT_ID`. That becomes increasingly awkward for server workloads because unrelated jobs accumulate in the same Flow project.
 
 | Status | Source | Meaning | Handling |
 |--------|--------|---------|----------|
@@ -1116,11 +1091,13 @@ These arrive in the response body as `data.error.details[].reason`. The worker a
 | **503** | FastAPI (`api/flow.py`) | "Extension not connected" | Worker waits for reconnect — status set to PENDING, not FAILED |
 | **504** | Agent | 60s timeout waiting for extension WS response | Treated as transient; re-queue PENDING |
 
-Status-code detection logic lives in `agent/worker/_parsing.py:_is_error` — a result is an error if `result.error` is set, `status >= 400`, **or** `data.error` is present.
+- **no `project_id` supplied** → FlowKit uses a session project and rotates it after idle time;
+- **explicit `project_id` supplied** → FlowKit reuses that exact Flow project;
+- higher-level applications can persist an order/job → Flow project mapping and reopen it days later for revisions.
 
-### Extension / Transport Errors
+This makes the API suitable for queues, ecommerce workflows, bots and other multi-job systems without losing the ability to return to old Flow projects.
 
-String patterns in `error_message` that the worker recognizes:
+## Production behavior
 
 | Error message contains | Cause | Handling |
 |-----------------------|-------|----------|
@@ -1134,44 +1111,111 @@ String patterns in `error_message` that the worker recognizes:
 | `Failed to fetch` | Network drop inside extension service worker | Retry with backoff |
 | `timeout` / WS 60s no response | Extension hung mid-request | Re-queue PENDING |
 
-### Worker Retry Policy
+- generation submissions are serialized by default;
+- minimum spacing between generation launches;
+- `PUBLIC_ERROR_UNUSUAL_ACTIVITY` is treated as a terminal/risk response instead of being blindly retried;
+- a short local circuit breaker prevents a failing caller from hammering Flow;
+- optional `X-FlowKit-Caller` identifies the integration that triggered a request without logging prompts or media contents;
+- `/api/flow/status` exposes generation-guard and session state;
+- the Flow tab can close after idle time and be reopened using the persistent browser profile when needed.
 
-`processor.py:_handle_failure` decides terminal vs retryable:
+## Live API compatibility
 
-1. **Auto-recover** if message contains `"not found"` → re-upload media, mark PENDING.
-2. **Transient WS** (`reconnected`/`disconnected`/`switched`) → re-queue PENDING, keep `retry_count`.
-3. **CAPTCHA** → retry up to 10× without counting toward `MAX_RETRIES`.
-4. **Default** → increment `retry_count`; if < `MAX_RETRIES` (5), schedule retry with `2^retry * 10s` backoff (capped 300s). Otherwise mark FAILED.
+Flow's internal request shapes are positional and can change. This fork keeps captured request builders and regression tests for the modes it automates.
 
-### YouTube Upload Errors
+Recent examples of live fixes include:
 
-From `youtube/upload.py` (HTTP errors from YouTube Data API v3):
+- current Flow project creation RPC;
+- Omni Flash 360p model / option slots;
+- updated first-frame full-frame crop structure;
+- trusted browser interaction for media selection and generation recovery;
+- image upload by direct bytes for external callers;
+- credit/account visibility and generation-cost estimates.
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `invalidTags` (400) | Tags exceed 500-char limit (incl. quote overhead: spaces → +2 per tag) | Trim tags; validate with `sum(len(t) + (2 if ' ' in t else 0) for t in tags) + (len(tags)-1) <= 500` |
-| `invalidCategoryId` (400) | Unknown category | Use `"22"` (People & Blogs) or `"24"` (Entertainment) |
-| `quotaExceeded` (403) | Daily 10K quota exhausted (uploads cost 1600) | Wait 24h (Pacific midnight reset) |
-| `uploadLimitExceeded` (400) | Channel daily upload cap hit | Wait 24h or use different channel |
-| `invalid_grant` (auth) | Token revoked or expired | Re-run `python3 youtube/auth.py <channel>` |
-| `scheduledPublishTimeInPast` | `publishAt` <= now | Use `auto_schedule()` or bump to next day |
+The capture methodology is documented in [`docs/CAPTURE.md`](docs/CAPTURE.md).
 
-### Common Symptoms → Fix
+## Dashboard and full video pipeline
 
-| Problem | Solution |
-|---------|----------|
-| Extension shows "Agent disconnected" | Start `python -m agent.main` |
-| Extension shows "No token" | Expected on the batch path — there is no bearer token any more |
-| `CAPTCHA_FAILED: NO_FLOW_TAB` | Open a Google Flow tab |
-| 403 `MODEL_ACCESS_DENIED` | Tier mismatch — check `/api/flow/credits`, downgrade model in `models.json` |
-| 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Pause submits, clear cookies for `google.com` + `labs.google` in Chrome, sign back in, then resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
-| Scene images inconsistent | Check all refs have UUID `media_id` — run `/fk-fix-uuids` |
-| `media_id` starts with `CAMS...` | Run `/fk-fix-uuids` to extract UUID from URL |
-| Upscale "permission denied" | Requires `PAYGATE_TIER_TWO` account |
-| Request stuck in PROCESSING | Check `error_message` history; if extension dropped, restart extension |
-| "Requested entity was not found" spam | Image URLs expired — re-upload via `POST /api/upload-image` or wait for auto-recovery |
-| YouTube upload `invalidTags` | Tag-char overflow; reduce tags (quote overhead bytes count) |
-| Python `cryptography` arch mismatch | Use `python3.10`, not `python3.13` (x86/arm64 binary mismatch) |
+FlowKit is more than the low-level API. The repository also contains the original project/dashboard pipeline for multi-scene generation, references, review and post-processing.
+
+<p align="center">
+  <img src="docs/images/dashboard_overview.png" width="760" alt="FlowKit dashboard" />
+</p>
+
+The low-level REST API can be used independently by your own application, while the higher-level pipeline remains available for larger video workflows.
+
+## Maintained fork vs upstream
+
+This repository started as a fork of **[crisng95/flowkit](https://github.com/crisng95/flowkit)** and keeps the MIT license and upstream attribution.
+
+The projects currently have different maintenance focuses:
+
+| This fork | Upstream |
+|---|---|
+| Fast live fixes for `flow.google.com` request changes | Original project and broader pipeline direction |
+| Server/API integrations and production diagnostics | Video-review/provider tooling and general project features |
+| Project/session lifecycle automation | Upstream baseline architecture |
+| Credit/account inspection | Original documentation and ecosystem |
+| Compatibility patches are submitted upstream when portable | Reviews/merges compatible contributions |
+
+This is **not** intended to erase or replace upstream credit. If you need the original project, use upstream. If you want the compatibility-focused version actively run and updated against live Flow, use this fork.
+
+Current upstream compatibility work is also submitted back through pull requests where practical.
+
+## Automatic compatibility monitoring
+
+Every normal trusted-UI generation now doubles as a **zero-extra-credit compatibility check**. FlowKit captures the actual `f.req` sent by the current Flow UI, strips prompts, media/project IDs, UUIDs, reCAPTCHA/opaque values and random seeds, then compares the remaining structure with the request builder that initiated the job.
+
+`GET /api/flow/status` exposes the latest sanitized `payload_drift` state. Structural changes such as a moved crop slot, changed client descriptor or new resolution flag are logged as `PAYLOAD_DRIFT` without storing the sensitive request payload.
+
+Near-term roadmap:
+
+- automated regression-test / patch branches for simple, whitelisted wire-format changes;
+- optional GitHub PR creation when a safe structural patch is inferred and the full suite passes;
+- safer periodic upstream syncs without overwriting fork-specific server features.
+
+The goal is to turn a future Flow frontend change from “the API is broken” into “FlowKit detected payload drift and has a tested compatibility patch ready.”
+
+## Search keywords / use cases
+
+FlowKit is relevant if you are looking for a:
+
+- Google Flow API / unofficial Google Flow API;
+- self-hosted Google Flow server;
+- Nano Banana API or Nano Banana self-hosted automation layer;
+- Omni Flash API / Omni image-to-video API;
+- Veo image-to-video automation;
+- AI image generation REST API;
+- AI video generation REST API;
+- local FastAPI bridge for Google Flow;
+- server-side Flow automation for bots, agents or ecommerce pipelines.
+
+## Important limitations
+
+- This uses **unofficial web interfaces**, not a stable public Google API.
+- Google may change Flow without notice.
+- A signed-in Google Flow browser session is required.
+- Your Google subscription, credit balance, model availability and regional limits still apply.
+- Do not treat local cost estimates as billing guarantees; Flow remains authoritative.
+- Respect Google's terms and any applicable content/usage policies.
+
+## Contributing
+
+Compatibility reports are most useful when they include:
+
+- FlowKit commit SHA;
+- endpoint/mode that failed;
+- HTTP/error code;
+- whether the same action works manually in the Flow UI;
+- sanitized structural differences only — **never post cookies, auth tokens or reCAPTCHA tokens**.
+
+If you capture a changed Flow request shape, add a regression test with the fix so the same drift does not return silently.
+
+## Upstream
+
+Original project: **[crisng95/flowkit](https://github.com/crisng95/flowkit)**
+
+Thanks to the original author and contributors for the architecture this fork builds on.
 
 ## Changelog
 
@@ -1242,26 +1286,4 @@ token the old REST API needed. Everything below is that migration.
 
 ## License
 
-MIT
-
----
-
-## Community & Support
-
-<p align="center">
-  <a href="https://www.facebook.com/groups/vibecodeera">
-    <img src="https://img.shields.io/badge/Join%20the%20Community-Vibe%20Code%20Era%20on%20Facebook-1877F2?style=for-the-badge&logo=facebook&logoColor=white" alt="Join the Vibe Code Era Facebook Group" />
-  </a>
-</p>
-
-**Share anything crazy and useful created with Vibe Code.** Drop in to:
-
-- Post the story-video runs and thumbnails you've generated
-- Share scene templates, prompt recipes, and reference-image setups
-- Ask for help when an output isn't matching what you imagined
-- Request features and report bugs you've hit in the wild
-- Trade tips on Google Flow plan limits, Veo i2v behaviour, and Chrome extension setup
-- Facebook Post via Extension MCP
-- Right way to build Mobile Application + System
-
-→ **[facebook.com/groups/vibecodeera](https://www.facebook.com/groups/vibecodeera)**
+MIT — see [`LICENSE`](LICENSE).

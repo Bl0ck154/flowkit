@@ -78,5 +78,6 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "Flow Kit"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArtaWC70lmGNnJ07AnYyMa59XAWSvmWoUlzY5wEWs9XFkKXWjSEXxCgXnAJS4wFILwXmqmQsaoPjfjKLiHBVmmtepm1wTVVx+J43KGK77tcD7QKyta/9w2ZkvMjsdli96ffAJNJqJzATWhpjrf903azVLpMaxKW+vhNxsFd3rYVL9nHGO1q9sujYWT96rYy+9c4/KGl60b0P0AcxM82Y1RkcsACBtJEAAWVDoRqwlL26V+rPoBOK2YnuE9IIywtAAdomdx3HFQVbZmPfH9ROLF69E4Py9VDyQMh1Yaui16nXCjra0jjRxrP4SfWPoCo01KYiI0eJXdubb8qvUFtcvYQIDAQAB"
 }

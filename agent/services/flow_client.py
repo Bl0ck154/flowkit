@@ -25,7 +25,7 @@ import uuid
 from typing import Optional
 
 from agent.config import (
-    VIDEO_MODELS,
+    VIDEO_MODELS, UPSCALE_MODELS,
     FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
@@ -66,6 +66,8 @@ class FlowClient:
         self._operation_projects: dict[str, str] = {}
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
+        # Remember the most recently resolved Flow project for legacy calls.
+        self._batch_active_project: Optional[str] = None
         self._generation_slots = asyncio.Semaphore(FLOW_GENERATION_MAX_CONCURRENT)
         self._generation_rate_gate = asyncio.Lock()
         self._generation_last_submit_at = 0.0
@@ -677,12 +679,18 @@ class FlowClient:
         legacy FLOW_PROJECT_ID fallback remains for older internal callers.
         """
         if project_id and self._UUID_RE.match(str(project_id)):
-            return str(project_id)
+            resolved = str(project_id)
+            self._batch_active_project = resolved
+            return resolved
+        if self._batch_active_project and self._UUID_RE.match(self._batch_active_project):
+            return self._batch_active_project
         if FLOW_PROJECT_ID:
+            self._batch_active_project = FLOW_PROJECT_ID
             return FLOW_PROJECT_ID
         raise fb.FlowBatchError(
             "NO_FLOW_PROJECT: every batchexecute call is scoped to a Flow project. "
-            "Create one in the Flow UI and pin its uuid as FLOW_PROJECT_ID."
+            "Pass a project id or use a public /api/flow endpoint so FlowKit can "
+            "resolve/create its session project."
         )
 
     def _batch_image_model(self, override: str | None = None) -> str:
@@ -730,6 +738,7 @@ class FlowClient:
             pid, title = fb.read_created_project(payload)
             if not self._UUID_RE.match(pid):
                 raise fb.FlowBatchError(f"invalid project id returned by Flow: {pid!r}")
+            self._batch_active_project = pid
             logger.info("Flow project created: %s title=%r", pid, title or project_title)
             return {"status": 200, "data": {"projectId": pid, "title": title or project_title}}
         except Exception as exc:
@@ -950,13 +959,35 @@ class FlowClient:
         )
 
     async def upscale_video(self, media_id: str, scene_id: str,
-                             aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                             resolution: str = "VIDEO_RESOLUTION_4K") -> dict:
-        """Upscale a video."""
-        return {"error": _unsupported(
-            "video upscale",
-            "no upsampler rpc appears in the new frontend's captures",
-        )}
+                            aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+                            resolution: str = "VIDEO_RESOLUTION_4K",
+                            project_id: str | None = None) -> dict:
+        """Submit Flow's native high-resolution video export through p0UkFb."""
+        model = UPSCALE_MODELS.get(resolution)
+        if not model:
+            return {"status": 400, "error": f"Unsupported upscale resolution: {resolution}"}
+
+        try:
+            pid = self._batch_project_id(project_id or "")
+            payload = await self._batch_payload(
+                fb.RPC_UPSCALE,
+                fb.upscale_request(media_id, pid, aspect=aspect_ratio, model=model),
+                fb.CAPTCHA_VIDEO,
+                timeout=120,
+            )
+            upscaled_media_id = fb.read_upscaled_media_id(payload)
+        except Exception as exc:
+            return _batch_error(exc)
+
+        workflow = {
+            "name": upscaled_media_id,
+            "primary_media_id": upscaled_media_id,
+            "project_id": pid,
+        }
+        return {"status": 200, "data": {
+            "media": [{"name": upscaled_media_id}],
+            "workflows": [workflow],
+        }}
 
     async def check_video_status(self, operations: list[dict]) -> dict:
         """One poll round for each submitted operation.
@@ -1100,17 +1131,27 @@ class FlowClient:
             fb.RPC_MEDIA, fb.media_request(media_id), timeout=60)
         return fb.read_media_urls(payload, media_id)
 
-    async def get_credits(self) -> dict:
-        """Get user credits and tier.
+    async def get_credits(self, refresh: bool = False) -> dict:
+        """Return the visible account balance when a signed-in browser is available.
 
-        The new frontend has no captured credits rpc, and the tier no longer
-        selects a model — aspect is its own slot and the model names are
-        fixed — so on the batch path this answers with the configured default
-        rather than pretending to know.
+        There is no dedicated captured credits RPC; an unavailable browser must
+        not be misrepresented as having zero credits.
         """
+        snapshot: dict = {"balance": None, "plan": None, "source": "unavailable"}
+        if self.connected:
+            try:
+                from agent.services.browser_session import inspect_flow_credits
+                snapshot = await inspect_flow_credits(refresh=refresh)
+            except Exception as exc:
+                logger.warning("Could not inspect Flow credits: %s", exc)
         return {"status": 200, "data": {
+            "balance": snapshot.get("balance"),
+            "plan": snapshot.get("plan"),
+            "source": snapshot.get("source"),
+            "cached": snapshot.get("cached", False),
+            "age_s": snapshot.get("age_s"),
             "userPaygateTier": DEFAULT_PAYGATE_TIER,
-            "note": "batchexecute path: tier is configured (DEFAULT_PAYGATE_TIER), not fetched",
+            "note": "Balance comes from the signed-in Flow account panel when available.",
         }}
 
     async def validate_media_id(self, media_id: str) -> bool:

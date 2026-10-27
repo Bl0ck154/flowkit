@@ -59,6 +59,7 @@ def test_parse_result_raw_is_attached(sample_image_success):
 
 @pytest.mark.asyncio
 async def test_apply_scene_result_generate_image_sets_fields_and_cascades(sample_uuid, mocker):
+    mocker.patch("agent.sdk.services.result_handler.crud.get_scene", new_callable=AsyncMock, return_value=None)
     mock_update = mocker.patch("agent.sdk.services.result_handler.crud.update_scene", new_callable=AsyncMock)
     # The chain cascade reads the scene back; unmocked this opens a real aiosqlite
     # connection, whose worker thread then outlives the test session.
@@ -81,6 +82,7 @@ async def test_apply_scene_result_generate_image_sets_fields_and_cascades(sample
 
 @pytest.mark.asyncio
 async def test_apply_scene_result_edit_image_same_cascade_as_generate(sample_uuid, mocker):
+    mocker.patch("agent.sdk.services.result_handler.crud.get_scene", new_callable=AsyncMock, return_value=None)
     mock_update = mocker.patch("agent.sdk.services.result_handler.crud.update_scene", new_callable=AsyncMock)
     # The chain cascade reads the scene back; unmocked this opens a real aiosqlite
     # connection, whose worker thread then outlives the test session.
@@ -153,6 +155,7 @@ async def test_apply_scene_result_skips_when_result_failed(mocker):
 
 @pytest.mark.asyncio
 async def test_apply_scene_result_horizontal_orientation_uses_correct_prefix(sample_uuid, mocker):
+    mocker.patch("agent.sdk.services.result_handler.crud.get_scene", new_callable=AsyncMock, return_value=None)
     mock_update = mocker.patch("agent.sdk.services.result_handler.crud.update_scene", new_callable=AsyncMock)
     # The chain cascade reads the scene back; unmocked this opens a real aiosqlite
     # connection, whose worker thread then outlives the test session.
