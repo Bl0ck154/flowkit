@@ -560,6 +560,39 @@ class FlowClient:
     # None of that can be replayed from here, so the agent builds the envelope
     # and the extension runs it inside a signed-in flow.google.com tab.
 
+    async def _dispatch_browser_rpc(
+        self, rpcid: str, freq: str, params: dict, *,
+        captcha_action: str | None, match: str | None,
+        custom_path: str | None, timeout: float,
+    ) -> dict:
+        """Use the standard extension or an explicitly enabled local UI backend.
+
+        In local UI mode, supported generation RPCs submit via the real Flow
+        composer. Other RPCs go through its signed-in Chrome CDP session.
+        Custom StreamChat paths remain on the extension bridge.
+        """
+        if _config.FLOW_BROWSER_BACKEND == "extension" or custom_path:
+            return await self._send("batch_rpc", params, timeout=timeout)
+
+        if rpcid in {
+            fb.RPC_GEN_IMAGE, fb.RPC_GEN_VIDEO, fb.RPC_GEN_VIDEO_TEXT,
+            fb.RPC_GEN_VIDEO_FIRST_LAST, fb.RPC_GEN_VIDEO_REFERENCES,
+        }:
+            from agent.services.flow_playwright_generation import run_flow_playwright_generation
+            return await run_flow_playwright_generation(
+                rpcid, freq,
+                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                timeout=timeout,
+            )
+
+        from agent.services.browser_session import run_flow_batch_rpc
+        return await run_flow_batch_rpc(
+            rpcid, freq,
+            captcha_action=captcha_action, match=match,
+            project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+            timeout=timeout,
+        )
+
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
@@ -581,7 +614,11 @@ class FlowClient:
 
         is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
         if not is_generation:
-            return await self._send("batch_rpc", params, timeout=timeout)
+            return await self._dispatch_browser_rpc(
+                rpcid, freq, params,
+                captcha_action=captcha_action, match=match,
+                custom_path=custom_path, timeout=timeout,
+            )
 
         now = time.monotonic()
         if now < self._generation_unusual_until:
@@ -614,7 +651,11 @@ class FlowClient:
                     await asyncio.sleep(delay)
                 self._generation_last_submit_at = time.monotonic()
 
-            result = await self._send("batch_rpc", params, timeout=timeout)
+            result = await self._dispatch_browser_rpc(
+                rpcid, freq, params,
+                captcha_action=captcha_action, match=match,
+                custom_path=custom_path, timeout=timeout,
+            )
             blob = f"{result.get('error', '')} {result.get('data', '')}"
             is_hijack = "extension_hijack" in blob.lower()
             is_unusual = (

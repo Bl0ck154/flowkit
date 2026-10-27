@@ -12,6 +12,7 @@ from agent.config import (
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
 from agent.services.flow_client import get_flow_client
+from agent import config as _config
 from agent.services.flow_project_session import current_session_project, ensure_session_project
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -617,6 +618,17 @@ async def _upload_image_bytes(
             result.get("error", result.get("data")),
         )
     media_id = result.get("_mediaId")
+    if media_id and _config.FLOW_BROWSER_BACKEND == "playwright_ui":
+        # Fresh API media need a cache or a picker refresh in the native UI.
+        from agent.services.flow_ui_generation import (
+            cache_uploaded_media_bytes,
+            mark_uploaded_media_for_ui_refresh,
+        )
+        cached = cache_uploaded_media_bytes(
+            media_id, image_bytes, mime_type=mime_type, file_name=file_name,
+        )
+        if cached is None:
+            mark_uploaded_media_for_ui_refresh(resolved_project_id, media_id)
     return {
         "media_id": media_id,
         "project_id": resolved_project_id,

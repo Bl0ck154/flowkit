@@ -32,3 +32,19 @@ sync candidate by running `git pull` inside a dirty production checkout.
   repository integration.
 - Optional YouTube tests require `googleapiclient` and may be omitted in a
   limited test environment; document skipped dependencies explicitly.
+
+## Fork-specific local UI backend
+
+Upstream's browser-extension transport remains the default. Dedicated local
+FlowKit Chrome setups can explicitly set `FLOW_BROWSER_BACKEND=playwright_ui`
+to restore the fork's Playwright native-composer generation and direct CDP
+metadata/media calls. Fresh API uploads also regain their native picker cache
+and refresh recovery. A signed-in Chrome profile, the optional Playwright
+dependency, and a dedicated Flow CDP endpoint (typically
+`FLOW_CHROME_CDP=http://127.0.0.1:9224`) are required.
+
+Do not enable this option for a generic extension-based upstream install or
+point it at an unrelated Chrome profile. The default
+`FLOW_BROWSER_BACKEND=extension` preserves upstream routing. Custom
+StreamChat RPCs use the extension bridge in both modes. Test local-browser
+compatibility in a controlled session before production rollout.

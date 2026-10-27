@@ -27,6 +27,16 @@ WS_PORT = int(os.environ.get("WS_PORT", "9222"))
 # lease instead of pinning all work into one forever-growing project.
 FLOW_PROJECT_ID = os.environ.get("FLOW_PROJECT_ID", "")
 
+# The stock upstream transport is the Chrome extension bridge. The fork can
+# opt into its local Flow CDP + native Playwright UI generator explicitly.
+# Never silently select CDP: it requires a separately owned, authenticated
+# local Chrome profile and is not available on standard upstream installs.
+FLOW_BROWSER_BACKEND = os.environ.get(
+    "FLOW_BROWSER_BACKEND", "extension"
+).strip().lower()
+if FLOW_BROWSER_BACKEND not in {"extension", "playwright_ui"}:
+    raise ValueError("FLOW_BROWSER_BACKEND must be extension or playwright_ui")
+
 # Ad-hoc direct /api/flow calls without a project share a short-lived project.
 # The lease survives browser tab parking and agent restarts, but rotates after
 # this much generation/upload inactivity.
