@@ -12,6 +12,7 @@ from agent.config import (
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
 )
 from agent.services.flow_client import get_flow_client
+from agent.services.flow_poll import check_workflow_status
 from agent.services.browser_session import (
     ensure_flow_session, inspect_flow_session, inspect_google_account,
 )
@@ -139,6 +140,7 @@ class CheckStatusRequest(BaseModel):
     workflows: Optional[list[dict]] = None
     project_id: str = ""
     include_encoded_video: bool = False
+    mode: Literal["omni", "export"] = "omni"
 
 
 class CheckOmniStatusRequest(BaseModel):
@@ -449,11 +451,16 @@ async def check_status(body: CheckStatusRequest):
 
     if body.workflows:
         try:
-            return await check_omni_flash_status(
+            result = await check_workflow_status(
                 body.workflows,
+                mode="media_redirect" if body.mode == "export" else "batch_media",
                 include_encoded_video=body.include_encoded_video,
                 project_id=body.project_id,
+                client=client,
             )
+            if body.mode == "export":
+                result["download_ready"] = result["status"] == "COMPLETED"
+            return result
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except RuntimeError as exc:

@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agent.services.flow_client import get_flow_client
-from agent.services.upscale_polling import annotate_upscale_polling, check_upscale_status
+from agent.services.flow_poll import annotate_polling, check_workflow_status
+from agent.services.flow_project_session import ensure_session_project
 
 router = APIRouter(prefix="/flow", tags=["flow"])
 
@@ -41,34 +42,48 @@ async def export_video(body: ExportVideoRequest):
         if body.quality == "1080p"
         else "VIDEO_RESOLUTION_4K"
     )
+    # An export is scoped to a real Flow project. A direct caller may omit
+    # project_id, in which case allocate/reuse the leased session project.
+    project_id = str(body.project_id or "").strip()
+    if not project_id:
+        try:
+            session = await ensure_session_project(client)
+            project_id = str(session.get("project_id") or "")
+        except Exception as exc:
+            raise HTTPException(502, f"Could not create Flow session project: {exc}") from exc
+        if not project_id:
+            raise HTTPException(502, "Flow session project did not return an id")
+
     result = await client.upscale_video(
         media_id=body.media_id,
         scene_id=body.scene_id,
         aspect_ratio=body.aspect_ratio,
         resolution=resolution,
-        project_id=body.project_id,
+        project_id=project_id,
     )
     if result.get("error") or (
         isinstance(result.get("status"), int) and result["status"] >= 400
     ):
-        raise HTTPException(
-            result.get("status", 502),
-            result.get("error", result.get("data")),
-        )
+        status = result.get("status")
+        http_status = status if isinstance(status, int) and 400 <= status <= 599 else 502
+        raise HTTPException(http_status, result.get("error", result.get("data")))
 
-    annotated = annotate_upscale_polling(result)
+    annotated = annotate_polling(result, mode="media_redirect", project_id=project_id)
     data = annotated.get("data", annotated)
     if isinstance(data, dict):
         data["export"] = {
             "quality": body.quality,
             "resolution": resolution,
             "native_flow_export": True,
-            "next": "/api/flow/check-export-status",
+            "next": "/api/flow/check-status",
+            "check_status_mode": "export",
         }
     return data
 
 
-@router.post("/check-export-status")
+# Backward-compatible aliases retained for existing fork clients.
+# New callers use /api/flow/check-status with mode=export.
+@router.post("/check-export-status", deprecated=True)
 @router.post("/check-upscale-status", include_in_schema=False)
 async def check_export_status(body: CheckExportStatusRequest):
     """Return a signed downloadable URL when the native Flow export is ready."""
@@ -76,7 +91,9 @@ async def check_export_status(body: CheckExportStatusRequest):
     if not client.connected:
         raise HTTPException(503, "Extension not connected")
     try:
-        result = await check_upscale_status(body.workflows)
+        result = await check_workflow_status(
+            body.workflows, mode="media_redirect", client=client,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

@@ -190,15 +190,12 @@ async def test_first_last_rejects_missing_end_before_submit():
 
 
 @pytest.mark.asyncio
-async def test_batch_omni_poll_uses_as29s_media(monkeypatch):
+async def test_batch_omni_poll_uses_as29s_media():
     client = MagicMock()
-    client.get_media = AsyncMock(return_value={
+    client.resolve_media_url = AsyncMock(return_value={
         "status": 200,
-        "data": {
-            "video": {
-                "fifeUrl": "https://flow-content.google/video/media-1?Signature=test"
-            }
-        },
+        "data": {"url": "https://flow-content.google/video/media-1?Signature=test",
+                 "contentType": "video/mp4"},
     })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
@@ -213,7 +210,7 @@ async def test_batch_omni_poll_uses_as29s_media(monkeypatch):
     assert result["done"] is True
     assert result["status"] == "COMPLETED"
     assert result["workflows"][0]["media"]["resolved_via"] == "as29s"
-    client.get_media.assert_awaited_once_with("media-1")
+    client.resolve_media_url.assert_awaited_once_with("media-1")
 
 
 @pytest.mark.asyncio
@@ -221,8 +218,11 @@ async def test_batch_poll_hands_back_the_signed_url_and_buffers_nothing():
     """The poller must return Flow's signed url, never the bytes: buffering a
     finished clip through the agent is what the as29s lookup exists to avoid."""
     client = MagicMock()
-    client.get_media = AsyncMock(return_value={"status": 200, "data": {"video": {
-        "fifeUrl": "https://flow-content.google/video/media-1?Signature=test"}}})
+    client.resolve_media_url = AsyncMock(return_value={
+        "status": 200,
+        "data": {"url": "https://flow-content.google/video/media-1?Signature=test",
+                 "contentType": "video/mp4"},
+    })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
@@ -241,8 +241,12 @@ async def test_batch_poll_treats_a_media_record_without_video_as_pending():
     """A media id exists before its clip does — the record serves the poster
     image first. Reading that as done is what saves a still instead of a video."""
     client = MagicMock()
-    client.get_media = AsyncMock(return_value={"status": 200, "data": {"image": {
-        "fifeUrl": "https://flow-content.google/image/media-1?Signature=test"}}})
+    client.resolve_media_url = AsyncMock(return_value={
+        "status": 200, "data": {
+            "url": "https://flow-content.google/image/media-1?Signature=test",
+            "contentType": "image/jpeg",
+        },
+    })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
