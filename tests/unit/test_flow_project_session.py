@@ -11,7 +11,6 @@ PROJECT_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 class FakeClient:
     def __init__(self):
         self.created = []
-        self._batch_active_project = None
 
     async def create_project(self, title):
         self.created.append(title)

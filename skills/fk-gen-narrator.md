@@ -188,7 +188,31 @@ The `ref_text` is the **exact transcript** of what's spoken in `ref_audio`.
 - If template was created via `/fk-gen-tts-template`: `ref_text` = the standard base transcript used during creation (stored in `templates.json`)
 - If template is a user-provided WAV: transcribe it first using whisper, then use that transcript as `ref_text` for all scenes
 
+### Edge-TTS Neural Voices (Zero-Cost, High-Fidelity Narration)
+
+The pipeline natively supports Microsoft Edge TTS for broadcast-grade neural voice synthesis:
+
+| Neural Voice Model | Voice Profile & Timbre | Optimal Genre | Recommended Rate |
+|:---|:---|:---|:---|
+| `vi-VN-NamMinhNeural` | Male, resonant baritone, authoritative Northern dialect | History, military, documentary, epic action | `+0%` or `-2%` (Solemn) |
+| `vi-VN-HoaiMyNeural` | Female, crystalline clarity, nuanced emotional delivery | Poetic drama, introspective narrative, tragedy | `+0%` or `+3%` |
+
+**Automated Python Edge-TTS Generation:**
+```python
+import edge_tts, asyncio
+
+async def generate_scene_edge_tts(text: str, out_wav: str, voice: str = "vi-VN-NamMinhNeural", rate: str = "+0%"):
+    communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+    await communicate.save(out_wav)
+```
+
+**Cinematic Punctuation & Pacing Controls:**
+- Em Dash (`—`): Enforces a 0.4s – 0.5s dramatic acoustic pause before revealing crucial plot words.
+- Ellipsis (`...`): Injects an atmospheric 0.6s trailing fade for lingering contemplation.
+- Comma (`,`): Structurally segments complex thoughts into 4–6 word cadences, preventing rushed phonemes.
+
 ### Key rules:
+
 - `ref_audio` = the voice template WAV file (voice timbre source)
 - `ref_text` = exact transcript of `ref_audio` (phoneme alignment)
 - Both MUST be provided together — never just `ref_audio` alone

@@ -24,6 +24,7 @@ from agent.api.materials import router as materials_router
 from agent.api.music import router as music_router
 from agent.api.models import router as models_router
 from agent.api.providers import router as providers_router
+from agent.api.provider_jobs import router as provider_jobs_router
 from agent.api.active_project import router as active_project_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
@@ -114,7 +115,7 @@ async def lifespan(app: FastAPI):
     logger.info("Flow Kit stopped")
 
 
-app = FastAPI(title="Flow Kit", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Flow Kit", version="1.3.1", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -159,6 +160,7 @@ app.include_router(reviews_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(materials_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
+app.include_router(provider_jobs_router, prefix="/api")
 app.include_router(models_router)
 app.include_router(providers_router)
 app.include_router(active_project_router)
@@ -193,12 +195,229 @@ async def ext_callback(request: Request):
     return {"ok": False, "reason": "no matching pending request"}
 
 
+@app.post("/api/ext/reload")
+async def ext_reload():
+    """Trigger extension to reload its background service worker."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    for ws in list(client._extensions.keys()):
+        try:
+            await ws.send(json.dumps({"id": "reload-1", "method": "reload_extension"}))
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@app.post("/api/ext/reload-flow-tab")
+async def ext_reload_flow_tab():
+    """Trigger extension to reload open Flow tabs."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    return await client._send("reload_flow_tab", {})
+
+
+@app.get("/api/ext/tabs")
+async def ext_tabs():
+    """List open Flow tabs from the extension."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    return await client._send("list_tabs", {})
+
+
+@app.get("/api/ext/debug-tab")
+async def ext_debug_tab():
+    """Inspect candidate Flow tab status."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    return await client._send("debug_tab", {})
+
+
+@app.get("/api/ext/test-captcha")
+async def ext_test_captcha(action: str = "IMAGE_GENERATION"):
+    """Test reCAPTCHA minting via extension."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    return await client._send("solve_captcha", {"captchaAction": action})
+
+
+@app.get("/api/ext/test-project-media")
+async def ext_test_project_media():
+    """Test listing media from active Flow project."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    from agent.services import flow_batch as fb
+    pid = "594758cc-11f5-4f92-8b3c-1213686591f4"
+    freq = fb.project_media_request(pid)
+    res = await client.batch_rpc(fb.RPC_PROJECT_MEDIA, freq)
+    raw = res.get("data", "")
+    with open("scratch/project_media_dump.txt", "w", encoding="utf-8") as f:
+        f.write(raw)
+    images = fb.read_images(raw) if raw else []
+    return {
+        "status": res.get("status"),
+        "error": res.get("error"),
+        "data_len": len(raw),
+        "images": [{"media_id": img.media_id, "url": img.url} for img in images[:10]],
+    }
+
+
+@app.get("/api/ext/test-op")
+async def ext_test_op(op: str):
+    """Fetch raw operation status for an operation ID."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    from agent.services import flow_batch as fb
+    res = await client.batch_rpc(fb.RPC_OPERATION, fb.operation_request(op))
+    return res
+
+
+@app.get("/api/ext/test-op-match")
+async def ext_test_op_match(op: str):
+    """Test matching an operation in project media listing."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    from agent.services import flow_batch as fb
+    pid = "594758cc-11f5-4f92-8b3c-1213686591f4"
+    res = await client.batch_rpc(fb.RPC_PROJECT_MEDIA, fb.project_media_request(pid), match=op)
+    raw = res.get("data", "")
+    found_mid = fb.find_media_id_in_text(raw, op)
+    return {
+        "status": res.get("status"),
+        "error": res.get("error"),
+        "raw_len": len(raw),
+        "raw": raw,
+        "found_mid": found_mid,
+    }
+
+
+@app.get("/api/ext/media-url")
+async def ext_media_url(media_id: str):
+    """Fetch signed media URLs for a media_id."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    from agent.services import flow_batch as fb
+    freq = fb.media_request(media_id)
+    res = await client.batch_rpc(fb.RPC_MEDIA, freq)
+    raw = res.get("data", "")
+    urls = None
+    if raw:
+        try:
+            payload = fb.first_payload(raw, fb.RPC_MEDIA)
+            urls = fb.read_media_urls(payload, media_id)
+        except Exception as e:
+            logger.warning("Failed to parse media urls for %s: %s", media_id, e)
+    return {
+        "status": res.get("status"),
+        "error": res.get("error"),
+        "raw": raw,
+        "urls": {"video": urls.video, "image": urls.image} if urls else None,
+    }
+
+
+@app.post("/api/ext/stream-chat")
+async def ext_stream_chat(request: Request):
+    """Trigger image generation via FlowCreationAgentService/StreamChat."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    data = await request.json()
+    prompt = data.get("prompt")
+    if not prompt:
+        from fastapi import HTTPException
+        raise HTTPException(400, "prompt is required")
+    project_id = data.get("project_id")
+    res = await client.stream_chat(prompt, project_id=project_id)
+    return res
+
+
+@app.post("/api/ext/submit-ui-prompt")
+async def ext_submit_ui_prompt(request: Request):
+    """Type prompt into Flow web UI ProseMirror editor and click create button."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    data = await request.json()
+    prompt = data.get("prompt")
+    if not prompt:
+        from fastapi import HTTPException
+        raise HTTPException(400, "prompt is required")
+    return await client._send("submit_ui_prompt", {"prompt": prompt})
+
+
+@app.post("/api/ext/eval-tab")
+async def ext_eval_tab(request: Request):
+    """Execute javascript in the active Flow tab's MAIN world and return result."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    data = await request.json()
+    return await client._send("eval_tab", {"code": data.get("code", "")})
+
+
+@app.get("/api/ext/find-actions")
+async def ext_find_actions():
+    """Find reCAPTCHA action names in Flow web scripts."""
+    client = get_flow_client()
+    if not client.connected:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Extension not connected")
+    return await client._send("find_actions", {})
+
+
+@app.post("/api/ext/netlog")
+async def ext_netlog(request: Request):
+    """Capture raw batchexecute requests from Flow UI."""
+    data = await request.json()
+    import pathlib
+    p = pathlib.Path("scratch/captured_netlog.jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(data) + "\n")
+    logger.info("Captured netlog: url=%s status=%s body_len=%d",
+                data.get("url"), data.get("statusCode"), len(data.get("body") or ""))
+    return {"ok": True}
+
+
+@app.get("/api/ext/netlog")
+async def ext_get_netlog():
+    """Retrieve captured raw batchexecute requests."""
+    import pathlib
+    p = pathlib.Path("scratch/captured_netlog.jsonl")
+    if not p.exists():
+        return {"captures": []}
+    lines = [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return {"captures": lines}
+
+
+
+
 @app.get("/health")
 async def health():
     client = get_flow_client()
     return {
         "status": "ok",
-        "version": "0.2.0",
+        "version": app.version,
         "extension_connected": client.connected,
         "ws": client.ws_stats,
     }
@@ -254,6 +473,28 @@ async def dashboard_ws(websocket: WebSocket):
         logger.debug("Dashboard WS client disconnected: %s", e)
     finally:
         event_bus.unsubscribe(q)
+
+
+@app.post("/api/test-direct")
+async def test_direct(request: Request):
+    from agent.services import flow_batch as fb
+    client = get_flow_client()
+    data = await request.json()
+    pid = data.get("project_id", "594758cc-11f5-4f92-8b3c-1213686591f4")
+    prompt = data.get("prompt")
+    ref_ids = data.get("ref_media_ids")
+    freq = fb.image_request(
+        prompt, pid, count=1,
+        aspect="IMAGE_ASPECT_RATIO_LANDSCAPE",
+        ref_media_ids=ref_ids,
+    )
+    try:
+        res = await client._batch_payload(fb.RPC_GEN_IMAGE, freq, fb.CAPTCHA_IMAGE)
+        imgs = fb.read_images(res)
+        return {"ok": True, "count": len(imgs), "images": [img.__dict__ for img in imgs]}
+    except Exception as e:
+        logger.exception("test_direct failed: %s", e)
+        return {"ok": False, "error": str(e)}
 
 
 if __name__ == "__main__":

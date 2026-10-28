@@ -1,6 +1,8 @@
 """Async CRUD operations with column whitelisting."""
+import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -8,7 +10,7 @@ from agent.db.schema import get_db, _db_lock
 
 logger = logging.getLogger(__name__)
 
-_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material"})
+_VALID_TABLES = frozenset({"character", "project", "video", "scene", "request", "material", "provider_job"})
 
 
 def _validate_table(table: str) -> None:
@@ -18,9 +20,9 @@ def _validate_table(table: str) -> None:
 # Column whitelists per table — prevents SQL injection via kwargs keys
 _COLUMNS = {
     "character": {"name", "slug", "entity_type", "description", "image_prompt", "voice_description", "reference_image_url", "media_id", "updated_at"},
-    "project": {"name", "description", "story", "thumbnail_url", "language", "status", "user_paygate_tier", "narrator_voice", "narrator_ref_audio", "material", "allow_music", "allow_voice", "updated_at"},
+    "project": {"name", "description", "story", "thumbnail_url", "language", "status", "user_paygate_tier", "narrator_voice", "narrator_ref_audio", "material", "allow_music", "allow_voice", "video_model_family", "updated_at"},
     "video": {"title", "description", "display_order", "status", "orientation", "vertical_url", "horizontal_url",
-              "thumbnail_url", "duration", "resolution", "youtube_id", "privacy", "tags", "updated_at"},
+              "thumbnail_url", "duration", "target_duration_s", "resolution", "youtube_id", "privacy", "tags", "updated_at"},
     "scene": {"prompt", "image_prompt", "video_prompt", "character_names", "parent_scene_id", "chain_type",
               "vertical_image_url", "vertical_image_media_id", "vertical_image_status",
               "vertical_video_url", "vertical_video_media_id", "vertical_video_status",
@@ -31,6 +33,9 @@ _COLUMNS = {
               "vertical_end_scene_media_id", "horizontal_end_scene_media_id",
               "trim_start", "trim_end", "duration", "display_order", "source", "transition_prompt", "narrator_text", "updated_at"},
     "request": {"status", "request_id", "media_id", "output_url", "error_message", "retry_count", "next_retry_at", "source_media_id", "updated_at"},
+    "provider_job": {"provider", "kind", "status", "prompt", "orientation", "source_url", "end_url", "extra",
+                     "claimed_by", "claimed_at", "lease_expires_at", "progress", "progress_message",
+                     "result", "error_message", "retry_count", "updated_at"},
 }
 
 
@@ -111,13 +116,13 @@ async def list_characters() -> list[dict]:
 
 # ─── Project ────────────────────────────────────────────────
 
-async def create_project(name: str, description: str = None, story: str = None, language: str = "en", user_paygate_tier: str = "PAYGATE_TIER_ONE", id: str = None, material: str = None, allow_music: bool = False, allow_voice: bool = False) -> dict:
+async def create_project(name: str, description: str = None, story: str = None, language: str = "en", user_paygate_tier: str = "PAYGATE_TIER_ONE", id: str = None, material: str = None, allow_music: bool = False, allow_voice: bool = False, video_model_family: str = "veo") -> dict:
     db = await get_db()
     pid, now = id or _uuid(), _now()
     async with _db_lock:
         await db.execute(
-            "INSERT INTO project (id,name,description,story,language,user_paygate_tier,material,allow_music,allow_voice,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (pid, name, description, story, language, user_paygate_tier, material, int(allow_music), int(allow_voice), now, now))
+            "INSERT INTO project (id,name,description,story,language,user_paygate_tier,material,allow_music,allow_voice,video_model_family,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pid, name, description, story, language, user_paygate_tier, material, int(allow_music), int(allow_voice), video_model_family or "veo", now, now))
         await db.commit()
     return await _get_with_db(db, "project", "id", pid)
 
@@ -161,13 +166,14 @@ async def get_project_characters(project_id: str) -> list[dict]:
 
 # ─── Video ──────────────────────────────────────────────────
 
-async def create_video(project_id: str, title: str, description: str = None, display_order: int = 0, orientation: str = None) -> dict:
+async def create_video(project_id: str, title: str, description: str = None, display_order: int = 0, orientation: str = None,
+                   target_duration_s: float = None) -> dict:
     db = await get_db()
     vid, now = _uuid(), _now()
     async with _db_lock:
         await db.execute(
-            "INSERT INTO video (id,project_id,title,description,display_order,orientation,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (vid, project_id, title, description, display_order, orientation, now, now))
+            "INSERT INTO video (id,project_id,title,description,display_order,orientation,target_duration_s,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (vid, project_id, title, description, display_order, orientation, target_duration_s, now, now))
         await db.commit()
     return await _get_with_db(db, "video", "id", vid)
 
@@ -235,18 +241,22 @@ async def list_characters_by_media_id(media_id: str) -> list[dict]:
 async def create_request(req_type: str, orientation: str = None,
                          scene_id: str = None, character_id: str = None,
                          project_id: str = None, video_id: str = None,
-                         source_media_id: str = None, **_kw) -> dict:
+                         source_media_id: str = None, provider: str = None,
+                         **_kw) -> dict:
+    from agent.config import DEFAULT_PROVIDER
     db = await get_db()
     rid, now = _uuid(), _now()
+    prov = (provider or DEFAULT_PROVIDER).strip().lower()
     async with _db_lock:
         await db.execute(
-            """INSERT INTO request (id,project_id,video_id,scene_id,character_id,type,orientation,source_media_id,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (rid, project_id, video_id, scene_id, character_id, req_type, orientation, source_media_id, now, now))
+            """INSERT INTO request (id,project_id,video_id,scene_id,character_id,type,orientation,source_media_id,provider,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (rid, project_id, video_id, scene_id, character_id, req_type, orientation, source_media_id, prov, now, now))
         await db.commit()
     return await _get_with_db(db, "request", "id", rid)
 
 async def get_request(rid: str): return await _get("request", "id", rid)
+async def get_request_by_operation_id(op_id: str): return await _get("request", "request_id", op_id)
 async def update_request(rid: str, **kw): return await _update("request", "id", rid, **kw)
 
 async def list_requests(scene_id: str = None, status: str = None,
@@ -338,3 +348,245 @@ async def list_materials() -> list[dict]:
     db = await get_db()
     cur = await db.execute("SELECT * FROM material ORDER BY created_at")
     return [dict(r) for r in await cur.fetchall()]
+
+
+# ---------------------------------------------------------------------------
+# Provider jobs — persistent handoff queue for external media providers/agents
+# ---------------------------------------------------------------------------
+# Lifecycle: QUEUED -> CLAIMED -> RUNNING -> SUCCEEDED | FAILED | CANCELLED.
+# A worker claims a job with a lease (claim + heartbeat extends it). If the
+# lease expires, any worker may reclaim the job — crashed workers never
+# strand jobs. Only the worker holding the lease may heartbeat/progress/
+# complete/fail.
+
+TERMINAL_JOB_STATUSES = frozenset({"SUCCEEDED", "FAILED", "CANCELLED"})
+
+
+def _lease_expiry_str(ttl_s: float) -> str:
+    return datetime.fromtimestamp(
+        datetime.now(timezone.utc).timestamp() + ttl_s,
+        tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+async def create_provider_job(provider: str, kind: str, prompt: str = "",
+                              orientation: str = None, source_url: str = None,
+                              start_url: str = None,
+                              end_url: str = None, extra: dict = None,
+                              job_id: str = None) -> dict:
+    """Create a QUEUED provider job. Returns the row."""
+    db = await get_db()
+    jid = job_id or uuid.uuid4().hex[:12]
+    now = _now()
+    async with _db_lock:
+        await db.execute(
+            """INSERT INTO provider_job
+               (id, provider, kind, status, prompt, orientation, source_url, start_url, end_url, extra, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (jid, provider.strip().lower(), kind, "QUEUED", prompt or "",
+             orientation, source_url, start_url, end_url,
+             json.dumps(extra or {}), now, now))
+        await db.commit()
+    return await _get_with_db(db, "provider_job", "id", jid)
+
+
+async def get_provider_job(job_id: str) -> Optional[dict]:
+    return await _get("provider_job", "id", job_id)
+
+
+async def list_provider_jobs(provider: str = None, status: str = None,
+                             limit: int = 100) -> list[dict]:
+    db = await get_db()
+    q, params = "SELECT * FROM provider_job WHERE 1=1", []
+    if provider:
+        q += " AND provider=?"; params.append(provider.strip().lower())
+    if status:
+        q += " AND status=?"; params.append(status)
+    q += " ORDER BY created_at DESC LIMIT ?"; params.append(limit)
+    cur = await db.execute(q, params)
+    return [dict(r) for r in await cur.fetchall()]
+
+
+async def claim_provider_job(job_id: str, worker_id: str,
+                             lease_ttl_s: float = 300) -> Optional[dict]:
+    """Claim a QUEUED job, or reclaim one whose lease expired.
+
+    Atomic single UPDATE guarded by status/lease — returns the updated row,
+    or None when the job isn't claimable (already held by a live worker,
+    terminal, or missing).
+    """
+    db = await get_db()
+    now, expiry = _now(), _lease_expiry_str(lease_ttl_s)
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET status='CLAIMED', claimed_by=?, claimed_at=?, lease_expires_at=?,
+                   updated_at=?, retry_count=retry_count+1
+               WHERE id=?
+                 AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED')
+                 AND (status='QUEUED'
+                      OR (status IN ('CLAIMED','RUNNING')
+                          AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))""",
+            (worker_id, now, expiry, now, job_id, now))
+        await db.commit()
+        if cur.rowcount == 0:
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def heartbeat_provider_job(job_id: str, worker_id: str,
+                                 lease_ttl_s: float = 300) -> Optional[dict]:
+    """Extend the lease. Only the lease holder may heartbeat a live job."""
+    db = await get_db()
+    now, expiry = _now(), _lease_expiry_str(lease_ttl_s)
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET lease_expires_at=?, updated_at=?,
+                   status=CASE WHEN status='CLAIMED' THEN 'RUNNING' ELSE status END
+               WHERE id=? AND claimed_by=?
+                 AND status IN ('CLAIMED','RUNNING')""",
+            (expiry, now, job_id, worker_id))
+        await db.commit()
+        if cur.rowcount == 0:
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def update_provider_job_progress(job_id: str, worker_id: str, progress: int,
+                                       message: str = None) -> Optional[dict]:
+    """Report progress. Only the lease holder may do this on a live job.
+
+    Returns the row, or None when the caller doesn't hold the lease or the
+    job isn't live (CLAIMED/RUNNING).
+    """
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET progress=?, progress_message=?, updated_at=?
+               WHERE id=? AND claimed_by=?
+                 AND status IN ('CLAIMED','RUNNING')""",
+            (max(0, min(100, int(progress))), message, now,
+             job_id, worker_id))
+        await db.commit()
+        if cur.rowcount == 0:
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def complete_provider_job(job_id: str, worker_id: str,
+                                result: dict = None) -> Optional[dict]:
+    """Complete a job as its lease holder.
+
+    Idempotent: the lease holder re-completing an already-SUCCEEDED job gets
+    the existing row back (safe retry after a lost response). Returns None
+    when the caller never held the lease or the job ended in another
+    terminal state.
+    """
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET status='SUCCEEDED', result=?, progress=100,
+                   lease_expires_at=NULL, updated_at=?
+               WHERE id=? AND claimed_by=?
+                 AND status IN ('CLAIMED','RUNNING')""",
+            (json.dumps(result or {}), now, job_id, worker_id))
+        await db.commit()
+        if cur.rowcount == 0:
+            row = await _get_with_db(db, "provider_job", "id", job_id)
+            if (row and row.get("status") == "SUCCEEDED"
+                    and row.get("claimed_by") == worker_id):
+                return row  # idempotent retry by the holder
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def fail_provider_job(job_id: str, worker_id: str,
+                            error: str) -> Optional[dict]:
+    """Fail a job as its lease holder.
+
+    Idempotent for the holder re-failing an already-FAILED job. A SUCCEEDED
+    or CANCELLED job cannot be failed — returns None.
+    """
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET status='FAILED', error_message=?,
+                   lease_expires_at=NULL, updated_at=?
+               WHERE id=? AND claimed_by=?
+                 AND status IN ('CLAIMED','RUNNING')""",
+            (error, now, job_id, worker_id))
+        await db.commit()
+        if cur.rowcount == 0:
+            row = await _get_with_db(db, "provider_job", "id", job_id)
+            if (row and row.get("status") == "FAILED"
+                    and row.get("claimed_by") == worker_id):
+                return row  # idempotent retry by the holder
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def cancel_provider_job(job_id: str) -> Optional[dict]:
+    """Producer-side cancel. Only non-terminal jobs can be cancelled.
+
+    Returns the row, or None when the job is missing or already terminal.
+    """
+    db = await get_db()
+    now = _now()
+    async with _db_lock:
+        cur = await db.execute(
+            """UPDATE provider_job
+               SET status='CANCELLED', lease_expires_at=NULL, updated_at=?
+               WHERE id=?
+                 AND status NOT IN ('SUCCEEDED','FAILED','CANCELLED')""",
+            (now, job_id))
+        await db.commit()
+        if cur.rowcount == 0:
+            return None
+    return await _get_with_db(db, "provider_job", "id", job_id)
+
+
+async def next_queued_provider_job(provider: str, worker_id: str,
+                                   lease_ttl_s: float = 300) -> Optional[dict]:
+    """Find the oldest claimable job for a provider and claim it.
+
+    Claimable = QUEUED, or CLAIMED/RUNNING with an expired lease.
+    Returns the claimed row, or None when nothing is available.
+    """
+    db = await get_db()
+    now = _now()
+    cur = await db.execute(
+        """SELECT id FROM provider_job
+           WHERE provider=?
+             AND (status='QUEUED'
+                  OR (status IN ('CLAIMED','RUNNING')
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= ?)))
+           ORDER BY created_at ASC LIMIT 1""",
+        (provider.strip().lower(), now))
+    row = await cur.fetchone()
+    if not row:
+        return None
+    return await claim_provider_job(row["id"], worker_id, lease_ttl_s)
+
+
+async def wait_for_provider_job(job_id: str, timeout_s: float = 600,
+                                poll_interval_s: float = 2.0) -> Optional[dict]:
+    """Block until a provider job reaches a terminal status or timeout.
+
+    Returns the final row, or None on timeout / missing job.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        job = await get_provider_job(job_id)
+        if job is None:
+            return None
+        if job.get("status") in TERMINAL_JOB_STATUSES:
+            return job
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(min(poll_interval_s, max(0.1, deadline - time.monotonic())))

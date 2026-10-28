@@ -1,9 +1,24 @@
-"""Post-processing: trim, merge, add music via ffmpeg."""
+import os
+import shutil
 import subprocess
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _ffmpeg_bin() -> str:
+    env_bin = os.environ.get("FFMPEG_BIN")
+    if env_bin:
+        return env_bin
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
 
 _FLOAT_MIN = 0.0
 _FLOAT_MAX = 2.0
@@ -17,6 +32,46 @@ def _clamp_float(value: float, name: str, lo: float = _FLOAT_MIN, hi: float = _F
     return value
 
 
+def probe_duration(path: str) -> float | None:
+    """Return media duration in seconds via ffprobe, or None on failure."""
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float(probe.stdout.strip())
+    except (ValueError, AttributeError, subprocess.SubprocessError, OSError):
+        logger.error("probe_duration failed for %s", path)
+        return None
+
+
+def normalize_clip(input_path: str, output_path: str, size: str | None = None,
+                   fps: int = 30) -> bool:
+    """Re-encode one clip to uniform h264/yuv420p + AAC so concat -c copy is safe.
+
+    Clips from different providers (Flow vs assistant) may differ in codec,
+    pixel format, or timebase; normalizing first avoids concat failures.
+    """
+    cmd = ["ffmpeg", "-y", "-i", str(input_path),
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(int(fps)),
+           "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+           "-movflags", "+faststart"]
+    if size:
+        cmd += ["-vf", f"scale={size}:force_original_aspect_ratio=decrease,"
+                       f"pad={size}:(ow-iw)/2:(oh-ih)/2"]
+    cmd.append(str(output_path))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.error("Normalize failed for %s: %s", input_path, e)
+        return False
+    if result.returncode != 0:
+        logger.error("Normalize failed for %s: %s", input_path, result.stderr[-300:])
+        return False
+    return True
+
+
 def trim_video(input_path: str, output_path: str, start: float, end: float) -> bool:
     """Trim video to [start, end] seconds."""
     if not Path(input_path).exists():
@@ -24,7 +79,7 @@ def trim_video(input_path: str, output_path: str, start: float, end: float) -> b
         return False
     duration = end - start
     cmd = [
-        "ffmpeg", "-y", "-i", input_path,
+        _ffmpeg_bin(), "-y", "-i", input_path,
         "-ss", str(start), "-t", str(duration),
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-force_key_frames", "expr:gte(t,0)",
@@ -43,14 +98,14 @@ def merge_videos(video_paths: list[str], output_path: str) -> bool:
     """Concatenate videos using ffmpeg concat demuxer."""
     concat_file = output_path + ".concat.txt"
     try:
-        with open(concat_file, "w") as f:
+        with open(concat_file, "w", encoding="utf-8") as f:
             for p in video_paths:
-                # Escape single quotes to prevent path injection in concat file
-                escaped = str(p).replace("'", "'\\''")
+                # Escape single quotes and use POSIX forward slashes for ffmpeg concat demuxer
+                escaped = Path(p).as_posix().replace("'", "'\\''")
                 f.write(f"file '{escaped}'\n")
 
         cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            _ffmpeg_bin(), "-y", "-f", "concat", "-safe", "0",
             "-i", concat_file,
             "-c:v", "copy", "-c:a", "copy",
             "-movflags", "+faststart",
@@ -94,7 +149,7 @@ def add_narration(video_path: str, narration_path: str, output_path: str,
     fade_start = max(0, duration - fade_out)
 
     cmd = [
-        "ffmpeg", "-y", "-i", video_path, "-i", narration_path,
+        _ffmpeg_bin(), "-y", "-i", video_path, "-i", narration_path,
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-filter_complex",
         f"[0:a]volume={sfx_volume}[sfx];[1:a]volume={narration_volume},afade=t=in:st=0:d={fade_in},afade=t=out:st={fade_start}:d={fade_out}[narr];[sfx][narr]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[aout]",
@@ -137,7 +192,7 @@ def add_music(video_path: str, music_path: str, output_path: str,
     fade_start = max(0, duration - fade_out)
 
     cmd = [
-        "ffmpeg", "-y", "-i", video_path, "-i", music_path,
+        _ffmpeg_bin(), "-y", "-i", video_path, "-i", music_path,
         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
         "-filter_complex",
         f"[0:a]volume=1.0[orig];[1:a]volume={music_volume},afade=t=in:st=0:d={fade_in},afade=t=out:st={fade_start}:d={fade_out}[music];[orig][music]amerge=inputs=2,pan=stereo|c0=c0+c2|c1=c1+c3[aout]",

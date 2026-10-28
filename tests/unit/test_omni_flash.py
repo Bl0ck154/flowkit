@@ -1,8 +1,9 @@
 """Unit tests for Gemini Omni Flash Flow submissions and workflow polling.
 
-Most legacy Omni wire-contract tests stay pinned to the pre-migration path.
-Batch-specific tests opt into ``USE_BATCH_RPC`` explicitly and lock down the
-migrated Flow payloads separately.
+Every mode here runs on the flow.google.com batch path; the REST implementations
+they used to shadow went with the transport. The wire-contract tests lock the
+captured envelopes — rpc id, model key and slot order — because a payload that
+submits but is shaped wrong buys a render and returns the wrong clip.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,8 +13,6 @@ import pytest
 import agent.services.omni_flash as omni_flash
 from agent.services.omni_flash import (
     OMNI_FLASH_MAX_REFERENCE_IMAGES,
-    _fetch_media_url,
-    _fetch_project_initial_data,
     _load_model_key,
     check_omni_flash_status,
     extract_omni_workflows,
@@ -22,12 +21,6 @@ from agent.services.omni_flash import (
     generate_omni_flash_text_video,
     generate_omni_flash_video,
 )
-
-
-@pytest.fixture(autouse=True)
-def legacy_transport(monkeypatch):
-    """Default to legacy for legacy wire-contract tests; batch tests opt in."""
-    monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", False)
 
 
 @pytest.mark.parametrize(
@@ -97,44 +90,8 @@ def test_extract_omni_workflows_uses_primary_media_id():
     ]
 
 
-def _mock_submit_client():
-    client = MagicMock()
-    client._client_context.return_value = {
-        "projectId": "project-1",
-        "tool": "PINHOLE",
-        "userPaygateTier": "PAYGATE_TIER_ONE",
-        "recaptchaContext": {
-            "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-            "token": "",
-        },
-        "sessionId": ";old",
-    }
-    client._build_url.side_effect = lambda name: f"https://example.test/{name}"
-    client._send = AsyncMock(
-        return_value={
-            "status": 200,
-            "data": {
-                "operations": [
-                    {
-                        "operation": {"name": "op-1"},
-                        "status": "MEDIA_GENERATION_STATUS_PENDING",
-                    }
-                ],
-                "workflows": [
-                    {
-                        "name": "workflow-1",
-                        "metadata": {"primaryMediaId": "media-1"},
-                    }
-                ],
-            },
-        }
-    )
-    return client
-
-
 @pytest.mark.asyncio
 async def test_batch_text_video_builds_4s_yhhmef_submit(monkeypatch):
-    monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
     client = MagicMock()
     client._batch_project_id.return_value = "11111111-2222-3333-4444-555555555555"
     client._batch_payload = AsyncMock(return_value=[
@@ -172,11 +129,8 @@ async def test_batch_text_video_builds_4s_yhhmef_submit(monkeypatch):
     assert payload[0][0][2] == omni_flash.fb.VIDEO_ASPECT_LANDSCAPE
 
 
-
-
 @pytest.mark.asyncio
 async def test_batch_first_frame_video_uses_eb1hjf_abra_i2v(monkeypatch):
-    monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
     client = MagicMock()
     pid = "11111111-2222-3333-4444-555555555555"
     client._batch_project_id.return_value = pid
@@ -213,74 +167,6 @@ async def test_batch_first_frame_video_uses_eb1hjf_abra_i2v(monkeypatch):
     assert request[2] == omni_flash.fb.VIDEO_ASPECT_LANDSCAPE
     assert request[4][1] == "media-start"
 
-@pytest.mark.asyncio
-async def test_submit_builds_flow_omni_first_frame_request_and_poll_descriptor():
-    client = _mock_submit_client()
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await generate_omni_flash_first_frame_video(
-            start_image_media_id="start-1",
-            prompt="Camera slowly pushes in",
-            project_id="project-1",
-            scene_id="scene-1",
-            duration_s=10,
-            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
-            user_paygate_tier="PAYGATE_TIER_ONE",
-            seed=321,
-        )
-
-    client._build_url.assert_called_once_with("generate_video")
-    method, params = client._send.await_args.args[:2]
-    assert method == "api_request"
-    assert params["captchaAction"] == "VIDEO_GENERATION"
-
-    body = params["body"]
-    assert body["useV2ModelConfig"] is True
-    assert set(body["mediaGenerationContext"]) == {"batchId"}
-    request = body["requests"][0]
-    assert request["videoModelKey"] == "abra_i2v_10s"
-    assert request["startImage"] == {"mediaId": "start-1"}
-    assert "endImage" not in request
-    assert request["seed"] == 321
-    assert result["data"]["flowkitPolling"]["mode"] == "project_media"
-    assert result["data"]["flowkitPolling"]["project_id"] == "project-1"
-
-
-@pytest.mark.asyncio
-async def test_submit_builds_flow_omni_first_last_request():
-    client = _mock_submit_client()
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await generate_omni_flash_first_last_video(
-            start_image_media_id="start-1",
-            end_image_media_id="end-1",
-            prompt="Move naturally from the first composition to the final composition",
-            project_id="project-1",
-            scene_id="scene-1",
-            duration_s=8,
-            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
-            user_paygate_tier="PAYGATE_TIER_ONE",
-            seed=456,
-        )
-
-    client._build_url.assert_called_once_with("generate_video_start_end")
-    method, params = client._send.await_args.args[:2]
-    assert method == "api_request"
-    body = params["body"]
-    request = body["requests"][0]
-    assert request["videoModelKey"] == "abra_i2v_8s"
-    assert request["startImage"] == {"mediaId": "start-1"}
-    assert request["endImage"] == {"mediaId": "end-1"}
-    assert request["aspectRatio"] == "VIDEO_ASPECT_RATIO_PORTRAIT"
-    assert request["seed"] == 456
-    assert result["data"]["flowkitPolling"]["workflows"] == [
-        {
-            "name": "workflow-1",
-            "primary_media_id": "media-1",
-            "project_id": "project-1",
-        }
-    ]
-
 
 @pytest.mark.asyncio
 async def test_first_frame_rejects_missing_start_before_submit():
@@ -304,147 +190,12 @@ async def test_first_last_rejects_missing_end_before_submit():
 
 
 @pytest.mark.asyncio
-async def test_submit_builds_flow_omni_r2v_request_and_poll_descriptor():
-    client = _mock_submit_client()
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await generate_omni_flash_video(
-            reference_media_ids=["ref-1", "ref-2"],
-            prompt="Two friends talking in a cafe",
-            project_id="project-1",
-            scene_id="scene-1",
-            duration_s=10,
-            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
-            user_paygate_tier="PAYGATE_TIER_ONE",
-            seed=123,
-        )
-
-    assert result["status"] == 200
-    assert result["data"]["flowkitPolling"] == {
-        "mode": "project_media",
-        "project_id": "project-1",
-        "workflows": [
-            {
-                "name": "workflow-1",
-                "primary_media_id": "media-1",
-                "project_id": "project-1",
-            }
-        ],
-    }
-    client._build_url.assert_called_once_with("generate_video_references")
-    client._send.assert_awaited_once()
-
-    method, params = client._send.await_args.args[:2]
-    assert method == "api_request"
-    assert params["captchaAction"] == "VIDEO_GENERATION"
-
-    body = params["body"]
-    assert body["useV2ModelConfig"] is True
-    assert body["mediaGenerationContext"]["audioFailurePreference"] == "BLOCK_SILENCED_VIDEOS"
-    assert body["clientContext"]["projectId"] == "project-1"
-
-    request = body["requests"][0]
-    assert request["videoModelKey"] == "abra_r2v_10s"
-    assert request["aspectRatio"] == "VIDEO_ASPECT_RATIO_LANDSCAPE"
-    assert request["seed"] == 123
-    assert request["metadata"] == {"sceneId": "scene-1"}
-    assert request["referenceImages"] == [
-        {"mediaId": "ref-1", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
-        {"mediaId": "ref-2", "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"},
-    ]
-
-
-def _project_response(generation_status="MEDIA_GENERATION_STATUS_PENDING", include_media=True):
-    media = []
-    if include_media:
-        media.append(
-            {
-                "name": "media-1",
-                "projectId": "project-1",
-                "workflowId": "workflow-1",
-                "mediaMetadata": {
-                    "mediaStatus": {"mediaGenerationStatus": generation_status}
-                },
-                "video": {"generatedVideo": {"model": "abra_r2v_4s"}},
-            }
-        )
-    return {
+async def test_batch_omni_poll_uses_as29s_media():
+    client = MagicMock()
+    client.resolve_media_url = AsyncMock(return_value={
         "status": 200,
-        "data": {
-            "result": {
-                "data": {
-                    "json": {
-                        "projectContents": {
-                            "workflows": [
-                                {
-                                    "name": "workflow-1",
-                                    "projectId": "project-1",
-                                    "metadata": {"primaryMediaId": "media-1"},
-                                }
-                            ],
-                            "media": media,
-                        }
-                    }
-                }
-            }
-        },
-    }
-
-
-@pytest.mark.asyncio
-async def test_project_poll_fetch_matches_live_flow_trpc_contract():
-    client = MagicMock()
-    client._send = AsyncMock(return_value={"status": 200, "data": {}})
-
-    await _fetch_project_initial_data(client, "project-1")
-
-    client._send.assert_awaited_once_with(
-        "trpc_request",
-        {
-            "url": (
-                "https://labs.google/fx/api/trpc/flow.projectInitialData?input="
-                "%7B%22json%22%3A%7B%22projectId%22%3A%22project-1%22%7D%7D"
-            ),
-            "method": "GET",
-            "headers": {"content-type": "application/json"},
-        },
-        timeout=15,
-    )
-
-
-@pytest.mark.asyncio
-async def test_media_redirect_fetch_requests_url_only_mode():
-    client = MagicMock()
-    client._send = AsyncMock(return_value={"status": 200, "data": {}})
-
-    await _fetch_media_url(client, "media-1")
-
-    client._send.assert_awaited_once_with(
-        "trpc_request",
-        {
-            "url": (
-                "https://labs.google/fx/api/trpc/media.getMediaUrlRedirect"
-                "?name=media-1"
-            ),
-            "method": "GET",
-            "headers": {"content-type": "application/json"},
-            "responseMode": "url",
-        },
-        timeout=15,
-    )
-
-
-@pytest.mark.asyncio
-async def test_batch_omni_poll_uses_as29s_media(monkeypatch):
-    monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
-    client = MagicMock()
-    client.get_media = AsyncMock(return_value={
-        "status": 200,
-        "data": {
-            "video": {
-                "fifeUrl": "https://flow-content.google/video/media-1?Signature=test"
-            }
-        },
+        "data": {"url": "https://flow-content.google/video/media-1?Signature=test",
+                 "contentType": "video/mp4"},
     })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
@@ -459,107 +210,51 @@ async def test_batch_omni_poll_uses_as29s_media(monkeypatch):
     assert result["done"] is True
     assert result["status"] == "COMPLETED"
     assert result["workflows"][0]["media"]["resolved_via"] == "as29s"
-    client.get_media.assert_awaited_once_with("media-1")
+    client.resolve_media_url.assert_awaited_once_with("media-1")
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_pending_uses_project_snapshot_not_legacy_transports():
+async def test_batch_poll_hands_back_the_signed_url_and_buffers_nothing():
+    """The poller must return Flow's signed url, never the bytes: buffering a
+    finished clip through the agent is what the as29s lookup exists to avoid."""
     client = MagicMock()
-    client._send = AsyncMock(return_value=_project_response())
-    client.get_media = AsyncMock(side_effect=AssertionError("legacy get_media forbidden"))
-    client.check_video_status = AsyncMock(side_effect=AssertionError("operation poll forbidden"))
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        result = await check_omni_flash_status(
-            [
-                {
-                    "name": "workflow-1",
-                    "primary_media_id": "media-1",
-                    "project_id": "project-1",
-                }
-            ]
-        )
-
-    client.get_media.assert_not_awaited()
-    client.check_video_status.assert_not_awaited()
-    client._send.assert_awaited_once()
-    assert result["done"] is False
-    assert result["status"] == "PENDING"
-    assert result["workflows"][0]["status"] == "PENDING"
-
-
-@pytest.mark.asyncio
-async def test_omni_poll_completed_returns_signed_url_without_buffering_video():
-    client = MagicMock()
-    client._send = AsyncMock(
-        side_effect=[
-            _project_response("MEDIA_GENERATION_STATUS_SUCCESSFUL"),
-            {
-                "status": 200,
-                "data": {
-                    "url": "https://flow-content.google/video/media-1?Signature=test"
-                },
-            },
-        ]
-    )
+    client.resolve_media_url = AsyncMock(return_value={
+        "status": 200,
+        "data": {"url": "https://flow-content.google/video/media-1?Signature=test",
+                 "contentType": "video/mp4"},
+    })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
             [{"name": "workflow-1", "primary_media_id": "media-1"}],
-            project_id="project-1",
-        )
+            include_encoded_video=True, project_id="project-1")
 
+    media = result["workflows"][0]["media"]
     assert result["done"] is True
-    assert result["status"] == "COMPLETED"
-    item = result["workflows"][0]
-    assert item["status"] == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
-    assert item["media"]["media_id"] == "media-1"
-    assert item["media"]["url"].startswith("https://flow-content.google/video/")
-    assert item["media"]["encoded_video_available"] is False
-    assert "encoded_video" not in item["media"]
+    assert media["url"].startswith("https://flow-content.google/video/")
+    assert media["encoded_video_available"] is False
+    assert media["encoded_video"] is None
 
 
 @pytest.mark.asyncio
-async def test_omni_poll_missing_media_is_pending():
+async def test_batch_poll_treats_a_media_record_without_video_as_pending():
+    """A media id exists before its clip does — the record serves the poster
+    image first. Reading that as done is what saves a still instead of a video."""
     client = MagicMock()
-    client._send = AsyncMock(return_value=_project_response(include_media=False))
+    client.resolve_media_url = AsyncMock(return_value={
+        "status": 200, "data": {
+            "url": "https://flow-content.google/image/media-1?Signature=test",
+            "contentType": "image/jpeg",
+        },
+    })
 
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await check_omni_flash_status(
             [{"name": "workflow-1", "primary_media_id": "media-1"}],
-            project_id="project-1",
-        )
+            project_id="project-1")
 
     assert result["done"] is False
     assert result["workflows"][0]["status"] == "PENDING"
-
-
-@pytest.mark.asyncio
-async def test_omni_poll_requires_project_id_for_legacy_descriptors():
-    with pytest.raises(ValueError, match="requires project_id"):
-        await check_omni_flash_status(
-            [{"name": "workflow-1", "primary_media_id": "media-1"}]
-        )
-
-
-@pytest.mark.asyncio
-async def test_submit_accepts_seven_references():
-    client = MagicMock()
-    client._client_context.return_value = {"projectId": "p"}
-    client._build_url.return_value = "https://example.test/omni"
-    client._send = AsyncMock(return_value={"status": 200, "data": {}})
-    refs = [f"ref-{i}" for i in range(OMNI_FLASH_MAX_REFERENCE_IMAGES)]
-
-    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
-        await generate_omni_flash_video(
-            reference_media_ids=refs,
-            prompt="test",
-            project_id="p",
-            duration_s=4,
-        )
-
-    request = client._send.await_args.args[1]["body"]["requests"][0]
-    assert len(request["referenceImages"]) == 7
 
 
 @pytest.mark.asyncio
@@ -587,9 +282,6 @@ async def test_submit_rejects_empty_reference_set():
 
 
 class TestMigratedOmniReferenceBatchModes:
-    @pytest.fixture(autouse=True)
-    def batch_transport(self, monkeypatch):
-        monkeypatch.setattr(omni_flash, "USE_BATCH_RPC", True)
 
     @pytest.fixture
     def client(self):
@@ -622,6 +314,19 @@ class TestMigratedOmniReferenceBatchModes:
         assert req[5][1] == "end"
         client._remember_operation.assert_called_once_with(
             "op-ref-1", "11111111-2222-3333-4444-555555555555")
+
+    async def test_seven_references_submit_rather_than_trip_the_validator(self, client):
+        """Seven is the limit, not one past it. This used to assert the
+        capability gap; now that r2v submits, it has to reach the wire —
+        otherwise an off-by-one in the validator looks like a Flow refusal."""
+        refs = [f"ref-{i}" for i in range(OMNI_FLASH_MAX_REFERENCE_IMAGES)]
+        result = await generate_omni_flash_video(
+            reference_media_ids=refs, prompt="seven", project_id="pid",
+            duration_s=4, resolution="720p")
+        assert result["status"] == 200
+        _rpcid, freq, _captcha = client._batch_payload.await_args.args[:3]
+        payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
+        assert payload[0][0][1] == [[None, r] for r in refs]
 
     async def test_reference_to_video_uses_mzza6b_and_all_references(self, client):
         result = await generate_omni_flash_video(

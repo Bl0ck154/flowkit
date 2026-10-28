@@ -15,24 +15,27 @@ API_PORT = int(os.environ.get("API_PORT", "8100"))
 WS_HOST = os.environ.get("WS_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("WS_PORT", "9222"))
 
-# ─── Google Flow API ────────────────────────────────────────
-# Legacy REST host. Flow moved to flow.google.com in September 2026 and stopped
-# minting the `Bearer ya29.…` this host needs, so these are only reachable with
-# USE_BATCH_RPC=0 on a browser profile that still has an old token.
-GOOGLE_FLOW_API = "https://aisandbox-pa.googleapis.com"
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY")
-RECAPTCHA_SITE_KEY = os.environ.get("RECAPTCHA_SITE_KEY", "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV")
 
-# ─── Flow batchexecute (the current path) ───────────────────
+# ─── Flow batchexecute ──────────────────────────────────────
 # Every call is signed in the page with the session cookie plus a per-page `at`
-# token, so the extension runs it inside a signed-in flow.google.com tab. Set
-# USE_BATCH_RPC=0 only to fall back to the dead REST path for a post-mortem.
-USE_BATCH_RPC = os.environ.get("USE_BATCH_RPC", "1") == "1"
+# token, so the extension runs it inside a signed-in flow.google.com tab. This
+# is the only transport; the REST path it replaced was removed once Flow stopped
+# minting the bearer it needed.
 
 # Optional legacy fallback for callers that still supply no project id. New
 # code should either create a real Flow project or use the session-project
 # lease instead of pinning all work into one forever-growing project.
 FLOW_PROJECT_ID = os.environ.get("FLOW_PROJECT_ID", "")
+
+# The stock upstream transport is the Chrome extension bridge. The fork can
+# opt into its local Flow CDP + native Playwright UI generator explicitly.
+# Never silently select CDP: it requires a separately owned, authenticated
+# local Chrome profile and is not available on standard upstream installs.
+FLOW_BROWSER_BACKEND = os.environ.get(
+    "FLOW_BROWSER_BACKEND", "extension"
+).strip().lower()
+if FLOW_BROWSER_BACKEND not in {"extension", "playwright_ui"}:
+    raise ValueError("FLOW_BROWSER_BACKEND must be extension or playwright_ui")
 
 # Ad-hoc direct /api/flow calls without a project share a short-lived project.
 # The lease survives browser tab parking and agent restarts, but rotates after
@@ -46,58 +49,95 @@ FLOW_SESSION_PROJECT_IDLE_S = max(300.0, float(os.environ.get("FLOW_SESSION_PROJ
 FLOW_ALLOW_DEGRADED = os.environ.get("FLOW_ALLOW_DEGRADED", "0") == "1"
 
 # Process-wide guard for every CAPTCHA-bearing generation submit, including
-# direct /api/flow calls that bypass the background worker's limiter. Keeping
-# this conservative protects the persistent Google session from accidental
-# bursts across agents/integrations sharing the same FlowKit instance.
-FLOW_GENERATION_MIN_INTERVAL_S = max(0.0, float(os.environ.get("FLOW_GENERATION_MIN_INTERVAL_S", "3")))
-FLOW_GENERATION_MAX_CONCURRENT = max(1, int(os.environ.get("FLOW_GENERATION_MAX_CONCURRENT", "1")))
-FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "1800")))
-_flow_risk_state_file = os.environ.get("FLOW_RISK_STATE_FILE")
-FLOW_RISK_STATE_FILE = (
-    Path(_flow_risk_state_file)
-    if _flow_risk_state_file
-    else (BASE_DIR / "flow_risk_state.json" if os.environ.get("FLOW_AGENT_DIR") else None)
+# direct API calls that bypass the background worker's limiter.
+FLOW_GENERATION_MIN_INTERVAL_S = max(
+    0.0, float(os.environ.get("FLOW_GENERATION_MIN_INTERVAL_S", "3"))
+)
+FLOW_GENERATION_MAX_CONCURRENT = max(
+    1, int(os.environ.get("FLOW_GENERATION_MAX_CONCURRENT", "1"))
+)
+# After Google answers PUBLIC_ERROR_UNUSUAL_ACTIVITY, no generation is submitted
+# for this long. The hold is written to FLOW_GENERATION_HOLD_PATH so a restart
+# does not lift it (#67): retrying into the block may be what prolongs it.
+FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S = max(
+    0.0, float(os.environ.get("FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S", "3600"))
+)
+FLOW_GENERATION_HOLD_PATH = BASE_DIR / "flow_generation_hold.json"
+FLOW_SESSION_PROJECT_IDLE_S = max(
+    300.0, float(os.environ.get("FLOW_SESSION_PROJECT_IDLE_S", "7200"))
 )
 
 # The tier no longer picks a model — aspect is its own slot and the model names
 # are fixed — so it is only carried for the DB column and the dashboard.
 DEFAULT_PAYGATE_TIER = os.environ.get("DEFAULT_PAYGATE_TIER", "PAYGATE_TIER_TWO")
 
+# ─── Media Provider ─────────────────────────────────────────
+# "flow" (default): generate via Google Flow through the Chrome extension.
+# "assistant": route all generation to the AI assistant instead — each request
+# is published as a row in the provider_job table and the worker waits for an
+# external worker (the assistant) to claim and complete it via
+# /api/provider-jobs. See agent/sdk/services/assistant_provider.py and
+# agent/worker/assistant_worker.py for the full protocol.
+# Default media provider for requests that don't specify one ("flow" |
+# "assistant" | "muse2api" | any registered provider name). MEDIA_PROVIDER is kept as a
+# legacy alias — DEFAULT_PROVIDER wins if both are set.
+DEFAULT_PROVIDER = os.environ.get(
+    "DEFAULT_PROVIDER", os.environ.get("MEDIA_PROVIDER", "flow")
+).strip().lower()
+MEDIA_PROVIDER = DEFAULT_PROVIDER  # legacy alias
+ASSISTANT_PROVIDER_TIMEOUT_S = int(os.environ.get("ASSISTANT_PROVIDER_TIMEOUT_S", "1800"))
+ASSISTANT_PROVIDER_POLL_S = int(os.environ.get("ASSISTANT_PROVIDER_POLL_S", "15"))
+ASSISTANT_MAX_CONCURRENT = int(os.environ.get("ASSISTANT_MAX_CONCURRENT", "2"))
+ASSISTANT_COOLDOWN_S = float(os.environ.get("ASSISTANT_COOLDOWN_S", "0"))
+
+# "muse2api": render through a muse2api gateway (https://github.com/crisng95/muse2api),
+# which fronts the muse.ai web app with an OpenAI-compatible API. The provider
+# is registered always and becomes available once MUSE2API_URL is set; the key
+# is the gateway's own MUSE2API_API_KEY. See agent/sdk/services/muse2api_provider.py.
+MUSE2API_URL = os.environ.get("MUSE2API_URL", "").strip().rstrip("/")
+MUSE2API_KEY = os.environ.get("MUSE2API_KEY", "")
+MUSE2API_IMAGE_MODEL = os.environ.get("MUSE2API_IMAGE_MODEL", "muse-image")
+MUSE2API_VIDEO_MODEL = os.environ.get("MUSE2API_VIDEO_MODEL", "muse-video")
+MUSE2API_VIDEO_SECONDS = int(os.environ.get("MUSE2API_VIDEO_SECONDS", "8"))
+# Covers the gateway's own failover (up to 3 accounts x its 240s/600s timeouts).
+MUSE2API_TIMEOUT_S = float(os.environ.get("MUSE2API_TIMEOUT_S", "1800"))
+MUSE2API_POLL_S = float(os.environ.get("MUSE2API_POLL_S", "5"))
+MUSE2API_MAX_CONCURRENT = int(os.environ.get("MUSE2API_MAX_CONCURRENT", "2"))
+MUSE2API_COOLDOWN_S = float(os.environ.get("MUSE2API_COOLDOWN_S", "0"))
+# muse.ai takes a first frame only. With this on, chained scenes drop the end
+# frame and r2v renders as i2v; off, both fail loudly (same rule as Flow).
+MUSE2API_ALLOW_DEGRADED = os.environ.get("MUSE2API_ALLOW_DEGRADED", "0") == "1"
+
 # ─── Worker ──────────────────────────────────────────────────
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 VIDEO_POLL_INTERVAL = int(os.environ.get("VIDEO_POLL_INTERVAL", "10"))  # polling interval for video/upscale status
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "5"))
 VIDEO_POLL_TIMEOUT = int(os.environ.get("VIDEO_POLL_TIMEOUT", "420"))
-API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # seconds between API calls (anti-spam)
-MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # Google Flow max parallel requests
+# Omni Flash defaults used by the worker when a project's video_model_family
+# is "omni_flash". Duration must be 4/6/8/10; resolution 360p or 720p.
+OMNI_FLASH_DURATION_S = int(os.environ.get("OMNI_FLASH_DURATION_S", "8"))
+OMNI_FLASH_RESOLUTION = os.environ.get("OMNI_FLASH_RESOLUTION", "720p")
+# Flow provider pacing. Every generate mints a reCAPTCHA inside the Flow tab;
+# firing them back-to-back from a background tab degrades the session score
+# until Google answers PUBLIC_ERROR_UNUSUAL_ACTIVITY. Slow down when that hits.
+FLOW_MAX_CONCURRENT = int(os.environ.get("FLOW_MAX_CONCURRENT", "5"))
+FLOW_COOLDOWN_S = float(os.environ.get("FLOW_COOLDOWN_S", "10"))
+API_COOLDOWN = int(os.environ.get("API_COOLDOWN", "10"))  # DEPRECATED: per-provider cooldown_s in provider capabilities is authoritative
+MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "5"))  # DEPRECATED: per-provider max_concurrent in provider capabilities is authoritative
 STALE_PROCESSING_TIMEOUT = int(os.environ.get("STALE_PROCESSING_TIMEOUT", "600"))  # 10 min
 
 # ─── Model Keys (loaded from models.json for easy updates) ──
 _MODELS_FILE = Path(__file__).parent / "models.json"
-with open(_MODELS_FILE) as _f:
+with open(_MODELS_FILE, encoding="utf-8") as _f:
     _MODELS = json.load(_f)
 
 VIDEO_MODELS = _MODELS["video_models"]
 UPSCALE_MODELS = _MODELS["upscale_models"]
 IMAGE_MODELS = _MODELS["image_models"]
 # Nickname from image_models. Known aliases live in models.json, while the
-# current batch path also accepts syntactically valid Flow wire model ids
-# directly so newly introduced image models do not require a FlowKit release.
+# batch path also accepts syntactically valid Flow wire model ids directly so
+# newly introduced image models do not require a Flow Kit release.
 DEFAULT_IMAGE_MODEL = _MODELS.get("default_image_model", "NANO_BANANA_PRO")
-
-# ─── API Endpoints ───────────────────────────────────────────
-ENDPOINTS = {
-    "generate_images": "/v1/projects/{project_id}/flowMedia:batchGenerateImages",
-    "generate_video": "/v1/video:batchAsyncGenerateVideoStartImage",
-    "generate_video_start_end": "/v1/video:batchAsyncGenerateVideoStartAndEndImage",
-    "generate_video_references": "/v1/video:batchAsyncGenerateVideoReferenceImages",
-    "upscale_video": "/v1/video:batchAsyncGenerateVideoUpsampleVideo",
-    "upscale_image": "/v1/flow/upsampleImage",
-    "upload_image": "/v1/flow/uploadImage",
-    "check_video_status": "/v1/video:batchCheckAsyncVideoGenerationStatus",
-    "get_credits": "/v1/credits",
-    "get_media": "/v1/media/{media_id}",
-}
 
 # ─── Output Directories ─────────────────────────────────────
 OUTPUT_DIR = BASE_DIR / "output"
@@ -121,7 +161,7 @@ REVIEW_SHEET_ROWS = int(os.environ.get("REVIEW_SHEET_ROWS", "3"))
 
 # ─── CLI Providers (video review vision analysis) ────────────
 _PROVIDERS_FILE = Path(__file__).parent / "providers.json"
-with open(_PROVIDERS_FILE) as _pvf:
+with open(_PROVIDERS_FILE, encoding="utf-8") as _pvf:
     CLI_PROVIDERS = json.load(_pvf)  # mutable dict, hot-reloaded like VIDEO_MODELS
 REVIEW_CLI_TIMEOUT_S = float(os.environ.get("REVIEW_CLI_TIMEOUT_S", "120"))
 
@@ -135,7 +175,7 @@ def _load_suno_key() -> str:
     if channels_dir.exists():
         for rules_file in channels_dir.glob("*/channel_rules.json"):
             try:
-                rules = json.loads(rules_file.read_text())
+                rules = json.loads(rules_file.read_text(encoding="utf-8"))
                 key = rules.get("api_keys", {}).get("suno", "")
                 if key:
                     return key
@@ -150,29 +190,3 @@ SUNO_CALLBACK_URL = os.environ.get("SUNO_CALLBACK_URL", f"http://{API_HOST}:{API
 SUNO_POLL_INTERVAL = int(os.environ.get("SUNO_POLL_INTERVAL", "5"))
 SUNO_POLL_TIMEOUT = int(os.environ.get("SUNO_POLL_TIMEOUT", "600"))
 
-# ─── Header Randomization Pools ─────────────────────────────
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36",
-]
-
-CHROME_VERSIONS = [
-    '"Google Chrome";v="109", "Chromium";v="109"',
-    '"Google Chrome";v="110", "Chromium";v="110"',
-    '"Google Chrome";v="111", "Chromium";v="111"',
-    '"Google Chrome";v="113", "Not-A.Brand";v="24"',
-    '"Google Chrome";v="120", "Not-A.Brand";v="24"',
-    '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
-]
-
-BROWSER_VALIDATIONS = [
-    "SgDQo8mvrGRdD61Pwo8wyWVgYgs=",
-]
-
-CLIENT_DATA = [
-    "CKi1yQEIh7bJAQiktskBCKmdygEIvorLAQiUocsBCIagzQEYv6nKARjRp88BGKqwzwE=",
-]

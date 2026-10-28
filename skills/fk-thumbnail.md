@@ -1,6 +1,14 @@
 Generate 4 YouTube-optimized thumbnail variants for a project video.
 
-Usage: `/fk-thumbnail [project_id]`
+Usage: `/fk-thumbnail [project_id] [--provider <name>]`
+## Provider (optional)
+
+Usage: `/fk-thumbnail [project_id] [--provider <name>]`
+
+Pass `"provider"` in the `generate-thumbnail` payload (`flow` | `assistant` |
+`muse2api`; default is the server `DEFAULT_PROVIDER`). The assistant provider queues a
+provider job — make sure a worker is running (see `/fk-provider`). Flow
+thumbnail generation needs the Chrome extension; assistant needs none.
 
 ## Step 1: Load project context
 
@@ -113,7 +121,8 @@ for i in 1 2 3 4; do
       "prompt": "<variant_prompt_with_text_embedded>",
       "character_names": ["<main_char1>", "<main_char2>"],
       "aspect_ratio": "LANDSCAPE",
-      "output_filename": "thumbnail_v'$i'.png"
+      "output_filename": "thumbnail_v'$i'.png",
+      "provider": "assistant"  // or "flow"; omit for server default
     }'
   sleep 8
 done

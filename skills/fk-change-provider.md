@@ -1,15 +1,21 @@
-# fk-change-provider — View & Switch the AI CLI for a Role
+# fk-change-provider — View & Switch the Reviewer for a Role
 
-View or change which AI CLI (`claude`, `agy`, `codex`) — and which model and
+View or change which reviewer (`muse`, `claude`, `agy`, `codex`) — and which model and
 reasoning effort — runs each AI role. One role exists today: `video_review`,
 the vision analysis behind `/fk-review-video`.
+
+- `muse` = the agent itself (Muse, Codex, or agy — whoever runs the
+  skills): no CLI, no model, no effort. The review flow becomes contact
+  sheets → hand scoring with your own vision → submit (see
+  `/fk-review-video` step 3a). Official provider, opt-in per role.
+- `claude` / `agy` / `codex` = AI CLIs the server shells out to.
 
 Usage:
 - `/fk-change-provider` — show current status
 - `/fk-change-provider list` — show current status
-- `/fk-change-provider set <claude|agy|codex>` — switch the provider
-- `/fk-change-provider set <provider> --model <id>` — switch provider and model
-- `/fk-change-provider set <provider> --effort <level>` — switch provider and effort
+- `/fk-change-provider set <muse|claude|agy|codex>` — switch the provider
+- `/fk-change-provider set <provider> --model <id>` — switch provider and model (CLIs only)
+- `/fk-change-provider set <provider> --effort <level>` — switch provider and effort (CLIs only)
   (for `agy`, model and effort are mutually exclusive — see Step 2)
 
 The dashboard has the same controls under **Settings**.
@@ -39,11 +45,12 @@ Then the providers:
 
 | Provider | Binary | Installed | Tested | Efforts |
 |----------|--------|-----------|--------|---------|
+| muse | — (the assistant) | Always | n/a | — |
 | claude | `claude` | Yes | Yes | low, medium, high, xhigh, max |
 | agy | `agy` | Yes | Yes | low, medium, high |
 | codex | `codex` | Yes | No | low, medium, high, xhigh, max |
 
-- `Installed` reflects whether the binary is found on PATH.
+- `Installed` reflects whether the binary is found on PATH (`muse` needs none).
 - `Tested` reflects the live `<binary> --version` probe (populated because of
   `?live=true`); `null` means not yet probed.
 

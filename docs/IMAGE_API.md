@@ -1,121 +1,108 @@
-# Image generation, editing and high-resolution export
+# Migrated Image API
 
-FlowKit's current image path runs on `flow.google.com` batchexecute. The public
-REST surface deliberately exposes the choices that Flow exposes in its image
-composer instead of hiding them in server configuration.
-
-## Capabilities
-
-```bash
-curl -fsS http://127.0.0.1:8100/api/flow/image-capabilities
-```
-
-The response includes the current image model ids/aliases, all supported aspect
-ratios, the generation-count range, and image export qualities. Model discovery
-is cached for one hour and reads the currently loaded Flow frontend bundle.
-Call with `?refresh=true` to force a rescan.
-
-FlowKit also accepts a syntactically valid Flow image-model wire id even when it
-has not appeared in this FlowKit release before. This is intentional: Google can
-add a model without requiring a FlowKit code change. Known friendly aliases live
-in `agent/models.json` and can still be hot-reloaded through `/api/models`.
-
-Current live UI choices verified on the production Flow account:
-
-- `GEM_PIX_2` / `NANO_BANANA_PRO` — Nano Banana Pro
-- `NARWHAL` / `NANO_BANANA_2` — Nano Banana 2
-- `HARBOR_SEAL` / `NANO_BANANA_2_LITE` — Nano Banana 2 Lite
+Flow's September 2026 frontend exposes image generation through the
+`flow.google.com` batchexecute transport. This document covers the image
+capabilities currently wired by Flow Kit.
 
 ## Generate images
 
-```bash
-curl -fsS -X POST http://127.0.0.1:8100/api/flow/generate-image \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "prompt": "A glass greenhouse in soft morning fog",
-    "project_id": "FLOW_PROJECT_UUID",
-    "image_model": "NANO_BANANA_2",
-    "aspect_ratio": "16:9",
-    "count": 2
-  }'
+`POST /api/flow/generate-image`
+
+```json
+{
+  "prompt": "A red paper boat on a calm pond",
+  "project_id": "<flow-project-uuid>",
+  "image_model": "HARBOR_SEAL",
+  "aspect_ratio": "16:9",
+  "count": 2,
+  "seed": 12345,
+  "reference_media_ids": []
+}
 ```
 
-`image_model` may be a friendly configured alias or an exact Flow wire id.
-`count` is `1..4`, matching the current Flow UI. FlowKit mirrors the UI exactly:
-`count=N` dispatches N independent `ogiZ0b` requests, so every image gets its
-own single-use reCAPTCHA token. FlowKit mirrors the current Flow UI launch
-cadence (captured x4 at roughly 0.0 / 0.5 / 1.5 / 2.5 seconds) instead of
-bursting every request at once; the generations still run concurrently after
-submission. This matters for Nano Banana Pro, which rejects the unofficial
-multi-item-in-one-RPC shape tolerated by Lite and is more prone to transient RPC
-`[8]` failures under an artificial burst. FlowKit treats only image RPC `[8]` as
-transient and retries that variant once after a 34-second cooldown; shorter
-retries were still rejected in live testing. Other RPC errors fail immediately.
-This retry is a FlowKit resilience policy, not a claim that Flow's UI performs
-the same automatic retry. The retry starts only after the entire first wave has
-settled, so it does not collide with still-running variants. If a multi-image
-request still has a failed variant after retry, successful images are preserved
-and the response includes `complete=false`, `generated_count`, and
-`failed_variants` instead of discarding the whole batch. An optional `seed` makes
-the first request reproducible; subsequent variants use a deterministic seed stride.
-`reference_media_ids` is the generic name for image
-references; the older `character_media_ids` field remains accepted and the two
-lists are de-duplicated.
+Current Flow UI model ids observed on the migrated frontend:
 
-Supported aspect ratios are exactly the five choices exposed by the current UI:
+- `GEM_PIX_2` — Nano Banana Pro (default)
+- `BELUGA` — Nano Banana 2.1; `BELUGA_THINKING_LOW` / `_MED` / `_HIGH` are its
+  thinking variants (accepted, not yet exercised live)
+- `HARBOR_SEAL` — Nano Banana 2 Lite
+- `NARWHAL` — Nano Banana 2, retired: answers `[5] NOT_FOUND` since October
+  2026. The `NANO_BANANA_2` nickname maps to `BELUGA` instead.
 
-| Friendly | Current wire id | Observed source size |
-|---|---|---:|
-| `1:1` | `IMAGE_ASPECT_RATIO_SQUARE` | 1024×1024 |
-| `9:16` | `IMAGE_ASPECT_RATIO_PORTRAIT` | 768×1376 |
-| `16:9` | `IMAGE_ASPECT_RATIO_LANDSCAPE` | 1376×768 |
-| `3:4` | `IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR` | 896×1200 |
-| `4:3` | `IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE` | 1200×896 |
+Friendly aliases from `models.json` continue to work. Flow Kit also passes a
+syntactically valid future wire model id through unchanged instead of silently
+coercing it to the default, so a newly exposed model can be selected before the
+next Flow Kit release once its id is known.
 
-The old FlowKit spelling `IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE` remains an
-alias for 3:4 so existing integrations do not break.
+`count` accepts 1-4, matching the Flow UI. Flow itself implements x2/x3/x4
+as independent single-image `ogiZ0b` RPCs, each with a single-use reCAPTCHA;
+it also staggers x4 launches at roughly 0.0 / 0.5 / 1.5 / 2.5 seconds. FlowKit
+mirrors that behavior instead of sending an unofficial multi-item burst inside
+one RPC. Each variant keeps its own seed; when `seed` is supplied, later
+variants use a deterministic stride.
 
-## Real image edit
+FlowKit treats only image RPC `[8]` as transient. It waits for the entire first
+variant wave to settle, cools down for 34 seconds, then retries only failed `[8]`
+variants once with fresh request UUIDs and the same seed. This is a FlowKit
+resilience policy; live UI capture did not show the same automatic retry. If a
+multi-image request still has a failed variant after retry, already successful
+images are preserved and the response reports `complete=false`,
+`generated_count`, and `failed_variants` instead of discarding the whole batch.
 
-```bash
-curl -fsS -X POST http://127.0.0.1:8100/api/flow/edit-image \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "prompt": "Change only the paper boat from red to blue",
-    "source_media_id": "SOURCE_MEDIA_UUID",
-    "project_id": "FLOW_PROJECT_UUID",
-    "image_model": "GEM_PIX_2",
-    "aspect_ratio": "16:9",
-    "reference_media_ids": []
-  }'
+## Aspect ratios
+
+All five current image ratios are supported, using either the friendly ratio or
+wire enum:
+
+| Ratio | Wire name |
+|---|---|
+| `1:1` | `IMAGE_ASPECT_RATIO_SQUARE` |
+| `9:16` | `IMAGE_ASPECT_RATIO_PORTRAIT` |
+| `16:9` | `IMAGE_ASPECT_RATIO_LANDSCAPE` |
+| `3:4` | `IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR` |
+| `4:3` | `IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE` |
+
+The older Flow Kit spelling `IMAGE_ASPECT_RATIO_PORTRAIT_FOUR_THREE` remains an
+alias for compatibility.
+
+## Edit an image
+
+`POST /api/flow/edit-image`
+
+The source image is sent as Flow's `BASE_IMAGE` input (wire type 2). Additional
+`reference_media_ids` remain reference inputs (wire type 1). This fixes the old
+batch-path behavior where the source itself was only a generic reference and
+therefore conditioned a fresh generation instead of performing a true edit.
+
+```json
+{
+  "prompt": "Make the paper boat blue",
+  "source_media_id": "<media-id>",
+  "project_id": "<flow-project-uuid>",
+  "image_model": "GEM_PIX_2",
+  "aspect_ratio": "16:9",
+  "count": 1
+}
 ```
 
-On the migrated transport the source is now encoded with Flow's distinct base
-image input type, while extra identity/style images remain reference inputs.
-This fixes the old migrated implementation, which mistakenly sent the source as
-just another reference and therefore behaved like reference-conditioned fresh
-generation rather than the editor's base-image flow.
+## Export / upscale image
 
-## Export / upscale an image
+`POST /api/flow/export-image`
 
-Flow exposes generated images as 1K originals and synchronous 2K/4K high-
-resolution downloads. FlowKit mirrors that operation through the current
-`SPrCad` / `FlowService.UpsampleImage` RPC.
-
-```bash
-curl -fsS -X POST http://127.0.0.1:8100/api/flow/export-image \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "media_id": "GENERATED_IMAGE_MEDIA_UUID",
-    "project_id": "FLOW_PROJECT_UUID",
-    "quality": "2k"
-  }' \
-  -o image-2k.jpg
+```json
+{
+  "media_id": "<generated-media-id>",
+  "project_id": "<flow-project-uuid>",
+  "quality": "2k"
+}
 ```
 
-The endpoint returns the image bytes directly (`image/jpeg`). `2k` is the normal
-high-resolution export. `4k` uses the same API but is plan-gated by Google Flow.
-`POST /api/flow/upscale-image` is retained as a compatibility alias.
+The migrated frontend uses RPC `SPrCad` (`FlowService.UpsampleImage`). The call
+is synchronous and returns the encoded JPEG, which the HTTP endpoint returns as
+a downloadable image.
 
-Live verification of the migrated 2K wire produced a **2752×1536 JPEG** from a
-1376×768 source image.
+- `2k` — standard high-resolution download; live verified
+- `4k` — same RPC with target code 2; availability is account/plan-gated
+
+Live verification on the current Flow frontend produced a 2752x1536 JPEG from a
+1376x768 source.

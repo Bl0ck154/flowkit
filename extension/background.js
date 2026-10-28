@@ -8,8 +8,10 @@
  * `Bearer ya29.…` the old REST host needed. The current path is `batch_rpc`:
  * the agent builds an `f.req` envelope, this worker mints a captcha for it and
  * runs the POST in the page's MAIN world, where the `at` CSRF token lives.
- * The bearer capture and `api_request` proxy below are the legacy path, kept
- * for USE_BATCH_RPC=0 and for an old pinned labs.google tab.
+ * The bearer capture and the `api_request` / `trpc_request` proxies below are
+ * the pre-migration path. The agent no longer sends either — it speaks only
+ * `batch_rpc`. They stay so an extension updated ahead of its agent keeps
+ * serving an older one; remove them once no agent in the wild sends them.
  */
 
 const AGENT_WS_URL = 'ws://127.0.0.1:9223';
@@ -25,6 +27,38 @@ const flowUrls = [
   'https://labs.google/fx/*/tools/flow*',
 ];
 const FLOW_TAB_URL = 'https://flow.google.com/';
+
+// ─── Temporary Netlog Recorder (docs/CAPTURE.md) ───────────
+const NETLOG_HOSTS = ['https://flow.google.com/_/*'];
+const netlogPending = new Map();
+
+chrome.webRequest.onBeforeRequest.addListener(
+  (d) => {
+    let body = null;
+    if (d.requestBody?.raw?.length) {
+      body = new TextDecoder().decode(new Uint8Array(d.requestBody.raw[0].bytes));
+    } else if (d.requestBody?.formData) {
+      body = JSON.stringify(d.requestBody.formData);
+    }
+    netlogPending.set(d.requestId, { ts: new Date().toISOString(), url: d.url, method: d.method, body });
+  },
+  { urls: NETLOG_HOSTS },
+  ['requestBody']
+);
+
+chrome.webRequest.onCompleted.addListener(
+  (d) => {
+    const rec = netlogPending.get(d.requestId);
+    if (!rec) return;
+    netlogPending.delete(d.requestId);
+    fetch('http://127.0.0.1:8100/api/ext/netlog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...rec, statusCode: d.statusCode }),
+    }).catch(() => {});
+  },
+  { urls: NETLOG_HOSTS }
+);
 
 let ws = null;
 let flowKey = null;
@@ -245,6 +279,197 @@ function connectToAgent() {
         await handleTrpcRequest(msg);
       } else if (msg.method === 'solve_captcha') {
         await handleSolveCaptcha(msg);
+      } else if (msg.method === 'reload_extension') {
+        chrome.runtime.reload();
+      } else if (msg.method === 'reload_flow_tab') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        for (const t of tabs) {
+          try { await chrome.tabs.reload(t.id); } catch {}
+        }
+        sendToAgent({ id: msg.id, result: { reloaded: tabs.length } });
+      } else if (msg.method === 'list_tabs') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        const list = tabs.map((t) => ({
+          id: t.id,
+          url: t.url,
+          active: t.active,
+          discarded: t.discarded,
+          title: t.title,
+        }));
+        sendToAgent({ id: msg.id, result: { tabs: list } });
+      } else if (msg.method === 'submit_ui_prompt') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        let candidate = tabs.find((t) => t.active && !t.discarded) || tabs[0];
+        if (!candidate) {
+          sendToAgent({ id: msg.id, result: { error: 'NO_FLOW_TAB' } });
+          return;
+        }
+        try {
+          const [injected] = await chrome.scripting.executeScript({
+            target: { tabId: candidate.id },
+            world: 'MAIN',
+            args: [msg.params?.prompt || ''],
+            func: async (promptText) => {
+              const editor = document.querySelector('.ProseMirror');
+              if (!editor) return { error: 'NO_PROSEMIRROR' };
+              editor.focus();
+              document.execCommand('selectAll', false, null);
+              document.execCommand('insertText', false, promptText);
+              editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText }));
+              editor.dispatchEvent(new Event('input', { bubbles: true }));
+              editor.dispatchEvent(new Event('change', { bubbles: true }));
+
+              await new Promise(r => setTimeout(r, 600));
+              const buttons = Array.from(document.querySelectorAll('button'));
+              const btn = buttons.find(b => b.getAttribute('aria-label') === 'Bắt đầu tạo' || b.innerText?.includes('arrow_forward'));
+              const disabled = btn?.disabled || btn?.getAttribute('disabled') !== null || btn?.getAttribute('aria-disabled') === 'true';
+
+              if (btn && !disabled) {
+                btn.focus();
+                try { btn.click(); } catch (_) {}
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(type => {
+                  btn.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, button: 0, buttons: 1 }));
+                });
+              }
+
+              ['keydown', 'keypress', 'keyup'].forEach(type => {
+                editor.dispatchEvent(new KeyboardEvent(type, {
+                  key: 'Enter',
+                  code: 'Enter',
+                  keyCode: 13,
+                  which: 13,
+                  bubbles: true,
+                  cancelable: true,
+                }));
+              });
+
+              return { success: true, btnFound: !!btn, btnDisabled: disabled, prompt: promptText.slice(0, 80) };
+            },
+          });
+          sendToAgent({ id: msg.id, result: injected?.result });
+        } catch (e) {
+          sendToAgent({ id: msg.id, result: { error: e.message } });
+        }
+      } else if (msg.method === 'debug_tab') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        let candidate =
+          tabs.find((t) => t.active && !t.discarded) ||
+          tabs.find((t) => t.url && t.url.includes('/edit/') && !t.discarded) ||
+          tabs.find((t) => !t.discarded) ||
+          tabs[0];
+        if (!candidate) {
+          sendToAgent({ id: msg.id, result: { error: 'NO_FLOW_TAB' } });
+          return;
+        }
+        try {
+          const [injected] = await chrome.scripting.executeScript({
+            target: { tabId: candidate.id },
+            world: 'MAIN',
+            func: () => {
+              const wiz = globalThis.WIZ_global_data || {};
+              return {
+                url: location.href,
+                hasAt: !!wiz.SNlM0e,
+                atLen: (wiz.SNlM0e || '').length,
+                sid: wiz.FdrFJe,
+                bl: wiz.cfb2h,
+                hasGrecaptcha: !!window.grecaptcha?.enterprise?.execute,
+                executeString: window.grecaptcha?.enterprise?.execute?.toString(),
+                hasHijack: !!window.__fk_hijack,
+                hijackPristine: typeof window.__fk_hijack?.pristine,
+                hijackTrapped: !!window.__fk_hijack?.trapped,
+                hijackSource: window.__fk_hijack?.source,
+                grecaptchaClients: Object.keys(window.___grecaptcha_cfg?.clients || {}),
+                promptElements: Array.from(document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]'))
+                  .map(el => ({ tag: el.tagName, id: el.id, className: el.className, placeholder: el.placeholder || el.getAttribute('aria-label') || el.getAttribute('placeholder') })),
+                editorContent: document.querySelector('.ProseMirror')?.innerText || '',
+                buttons: Array.from(document.querySelectorAll('button'))
+                  .map(b => ({ id: b.id, text: b.innerText?.trim()?.slice(0, 30), ariaLabel: b.getAttribute('aria-label') }))
+                  .filter(b => b.text || b.ariaLabel)
+                  .slice(-15),
+                chatMessages: Array.from(document.querySelectorAll('p, [role="log"], [class*="message"], [class*="prompt"], [class*="response"]'))
+                  .map(el => el.innerText?.trim())
+                  .filter(t => t && t.length > 10 && t.length < 500)
+                  .slice(-8),
+                flowImages: Array.from(document.querySelectorAll('img'))
+                  .map(img => ({ src: img.src, alt: img.alt }))
+                  .filter(img => img.src && (img.src.includes('flow-content') || img.src.includes('googleusercontent') || img.src.includes('image/')))
+                  .slice(-8),
+                scripts: Array.from(document.querySelectorAll('script')).map(s => s.src).filter(s => s.includes('recaptcha') || s.includes('flow')),
+              };
+            },
+          });
+          sendToAgent({ id: msg.id, result: { tabId: candidate.id, data: injected?.result } });
+        } catch (e) {
+          sendToAgent({ id: msg.id, result: { tabId: candidate.id, error: e.message } });
+        }
+      } else if (msg.method === 'eval_tab') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        let candidate = tabs.find((t) => t.active && !t.discarded) || tabs[0];
+        if (!candidate) {
+          sendToAgent({ id: msg.id, result: { error: 'NO_FLOW_TAB' } });
+          return;
+        }
+        try {
+          const [injected] = await chrome.scripting.executeScript({
+            target: { tabId: candidate.id },
+            world: 'MAIN',
+            args: [msg.params?.code || ''],
+            func: (codeStr) => {
+              try {
+                return { result: eval(codeStr) };
+              } catch (e) {
+                return { error: e.message, stack: e.stack };
+              }
+            },
+          });
+          sendToAgent({ id: msg.id, result: injected?.result });
+        } catch (e) {
+          sendToAgent({ id: msg.id, result: { error: e.message } });
+        }
+      } else if (msg.method === 'find_actions') {
+        const tabs = await chrome.tabs.query({ url: flowUrls });
+        let candidate = tabs.find((t) => t.active && !t.discarded) || tabs[0];
+        if (!candidate) {
+          sendToAgent({ id: msg.id, result: { error: 'NO_FLOW_TAB' } });
+          return;
+        }
+        try {
+          const [injected] = await chrome.scripting.executeScript({
+            target: { tabId: candidate.id },
+            world: 'MAIN',
+            func: async () => {
+              const scriptTags = Array.from(document.querySelectorAll('script')).map((s) => s.src).filter(Boolean);
+              const perfEntries = performance.getEntriesByType('resource')
+                .map(r => r.name)
+                .filter(u => u.includes('.js') || u.includes('/js/'));
+              const allScripts = Array.from(new Set([...scriptTags, ...perfEntries]));
+              const matches = [];
+              const scanned = [];
+              for (const src of allScripts) {
+                if (src.includes('recaptcha')) continue;
+                try {
+                  scanned.push(src);
+                  const resp = await fetch(src);
+                  const text = await resp.text();
+                  const re = /action:\s*['"]([A-Z0-9_]{3,40})['"]/g;
+                  let m;
+                  while ((m = re.exec(text)) !== null) {
+                    matches.push({ src: src.slice(-50), action: m[1] });
+                  }
+                  const re2 = /\.execute\([^,]+,\s*\{\s*action:\s*['"]([^'"]+)['"]/g;
+                  while ((m = re2.exec(text)) !== null) {
+                    matches.push({ src: src.slice(-50), executeAction: m[1] });
+                  }
+                } catch (e) {}
+              }
+              return { matches, scriptCount: allScripts.length, scannedCount: scanned.length, scannedSample: scanned.slice(0, 10) };
+            },
+          });
+          sendToAgent({ id: msg.id, result: injected?.result });
+        } catch (e) {
+          sendToAgent({ id: msg.id, result: { error: e.message } });
+        }
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -296,9 +521,13 @@ function keepAlive() {
 function sendToAgent(msg) {
   // API responses (with msg.id) go via HTTP — immune to WS disconnect
   if (msg.id) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (callbackSecret) {
+      headers['X-Callback-Secret'] = callbackSecret;
+    }
     fetch('http://127.0.0.1:8100/api/ext/callback', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(msg),
     }).catch(() => {
       // HTTP failed — fallback to WS
@@ -383,8 +612,8 @@ async function solveCaptcha(requestId, captchaAction) {
   }
 
   // Try each Flow tab in turn. A tab that answers "no grecaptcha" is a tab
-  // sitting on a page that never loaded it — another Flow tab may well be
-  // fine. Returning on the first one let one stale tab veto every generation.
+  // Try project tabs first (they have the full toolchain and recaptcha context loaded)
+  tabs.sort((a, b) => ((b.url && b.url.includes('/project/')) ? 1 : 0) - ((a.url && a.url.includes('/project/')) ? 1 : 0));
   const errors = [];
   for (const candidate of tabs) {
     const tab = await reviveTabIfNeeded(candidate);
@@ -464,7 +693,11 @@ const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
 async function runBatchRpc(cmd) {
   const tabs = await chrome.tabs.query({ url: flowUrls });
-  let candidate = tabs.find((t) => !t.discarded) || tabs[0];
+  let candidate =
+    tabs.find((t) => t.url && t.url.includes('/project/') && !t.discarded) ||
+    tabs.find((t) => t.active && !t.discarded) ||
+    tabs.find((t) => !t.discarded) ||
+    tabs[0];
   if (!candidate) {
     // No Flow tab — open one and give the app a moment to boot, otherwise
     // WIZ_global_data is not on the page yet and `at` comes back empty. Keep
@@ -485,7 +718,7 @@ async function runBatchRpc(cmd) {
 
   let freq = cmd.freq;
   if (cmd.captchaAction) {
-    const solved = await solveCaptcha(cmd.id, cmd.captchaAction);
+    const solved = await captchaFromTab(tab.id, cmd.id, cmd.captchaAction);
     if (!solved?.token) return { error: `CAPTCHA_FAILED: ${solved?.error || 'no token'}` };
     freq = freq.split(CAPTCHA_SLOT).join(solved.token);
   }
@@ -493,23 +726,25 @@ async function runBatchRpc(cmd) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     world: 'MAIN',
-    args: [cmd.rpcid, freq, MAX_RPC_TEXT, cmd.match || null],
-    func: async (rpcid, freqStr, maxText, match) => {
+    args: [cmd.rpcid, freq, MAX_RPC_TEXT, cmd.match || null, cmd.customPath || null],
+    func: async (rpcid, freqStr, maxText, match, customPath) => {
       const wiz = globalThis.WIZ_global_data || {};
       const at = wiz.SNlM0e;
       const sid = wiz.FdrFJe;
       const bl = wiz.cfb2h;
       if (!at) return { error: 'NO_AT_TOKEN' };
+
       const reqid = Math.floor(Math.random() * 900000) + 100000;
-      // Match the request metadata emitted by Flow's own WIZ client. In
-      // particular GEM_PIX_2 rejects image generation without source-path.
+      // Match Flow's own WIZ metadata. GEM_PIX_2 (Nano Banana Pro) rejects
+      // image generation when source-path is missing even though Lite may not.
       const sourcePath = location.pathname || '/';
       const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
-      const url =
-        `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
-        `&source-path=${encodeURIComponent(sourcePath)}` +
-        `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
-        `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
+      const url = customPath
+        ? `${customPath}?bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`
+        : `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
+          `&source-path=${encodeURIComponent(sourcePath)}` +
+          `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
+          `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
       const resp = await fetch(url, {
         method: 'POST',
         credentials: 'include',
@@ -524,11 +759,22 @@ async function runBatchRpc(cmd) {
       // is one entry. Cutting it down here keeps that payload inside the tab
       // instead of pushing it through the bridge on every poll.
       if (match) {
-        const found = text.indexOf(match);   // not `at` — that is the CSRF token above
+        const lowerText = text.toLowerCase();
+        const lowerMatch = match.toLowerCase();
+        const found = lowerText.indexOf(lowerMatch);
+        if (found !== -1) {
+          const start = Math.max(0, found - 400);
+          const end = Math.min(text.length, found + 800);
+          return {
+            status: resp.status,
+            matched: true,
+            text: text.slice(start, end),
+          };
+        }
         return {
           status: resp.status,
-          matched: found !== -1,
-          text: found === -1 ? '' : text.slice(found, found + 800),
+          matched: false,
+          text: '',
         };
       }
       return { status: resp.status, text: text.slice(0, maxText) };
@@ -540,7 +786,7 @@ async function runBatchRpc(cmd) {
 
 async function handleBatchRpc(msg) {
   const { id, params } = msg;
-  const { rpcid, freq, captchaAction, match } = params || {};
+  const { rpcid, freq, captchaAction, match, customPath } = params || {};
   if (!rpcid || !freq) {
     sendToAgent({ id, status: 400, error: 'INVALID_BATCH_RPC' });
     return;
@@ -552,16 +798,24 @@ async function handleBatchRpc(msg) {
   // Polls and listing lookups run constantly; only the generates are worth
   // a row in the log the popup shows.
   const visible = hasCaptcha;
+  const _RPC_LABELS = {
+    ogiZ0b: 'Gen Image', eb1hJf: 'Gen Video', YhhmEf: 'Gen Video (text)',
+    nprQif: 'Gen Video (chain)', MZZa6b: 'Gen Video (refs)',
+    maseQ: 'Upload Image', SPrCad: 'Upscale Image',
+    jHPbke: 'Create Project', jwpduf: 'Poll Operation',
+    Zzl0ze: 'Project Media', as29s: 'Get Media',
+  };
+  const logType = _RPC_LABELS[rpcid] || `RPC:${rpcid}`;
   if (visible) {
     addRequestLog({
-      id, type: `RPC:${rpcid}`, time: new Date().toISOString(),
+      id, type: logType, time: new Date().toISOString(),
       status: 'processing', error: null, outputUrl: null, url: rpcid,
       payloadSummary: freq.slice(0, 200),
     });
   }
 
   try {
-    const out = await runBatchRpc({ id, rpcid, freq, captchaAction, match });
+    const out = await runBatchRpc({ id, rpcid, freq, captchaAction, match, customPath });
     if (out.error) {
       if (hasCaptcha) { metrics.failedCount++; metrics.lastError = out.error; }
       if (visible) updateRequestLog(id, { status: 'failed', error: out.error });
@@ -643,8 +897,12 @@ async function handleTrpcRequest(msg) {
   }
 }
 
-// Legacy REST proxy against aisandbox-pa. Reachable only with USE_BATCH_RPC=0
-// on a profile that still holds a `Bearer ya29.…`; Flow stopped minting those.
+// Legacy REST proxy against aisandbox-pa. No current agent sends `api_request`;
+// kept only so an extension updated ahead of its agent still serves an older
+// one. It needs a `Bearer ya29.…` that Flow stopped minting, so it 401s on any
+// post-migration profile — as does sendTelemetry below, which early-returns
+// without a flowKey. Nothing here reaches aisandbox-pa any more; when the
+// oldest agent in the wild speaks batch_rpc, this and the host permission go.
 async function handleApiRequest(msg) {
   const { id, params } = msg;
   const { url, method, headers, body, captchaAction } = params;
@@ -842,6 +1100,7 @@ chrome.runtime.onMessage.addListener((msg, _, reply) => {
       .catch((e) => reply({ error: e.message }));
     return true;
   }
+
 
   if (msg.type === 'TRPC_MEDIA_URLS') {
     handleTrpcMediaUrls(msg.trpcUrl, msg.body);

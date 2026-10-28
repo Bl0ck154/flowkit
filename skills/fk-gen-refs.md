@@ -2,6 +2,15 @@ Generate reference images for all entities in a project.
 
 Usage: `/fk-gen-refs <project_id>`
 
+## Provider (optional)
+
+Usage: `/fk-gen-refs <project_id> [--provider <name>]`
+
+Pass `"provider": "<name>"` on each item in the `/api/requests/batch`
+payload (`flow` | `assistant` | `muse2api`; default is the server `DEFAULT_PROVIDER`).
+The assistant provider queues a provider job — make sure a worker is running
+(see `/fk-provider`).
+
 If no project_id provided, use `GET /api/active-project` or list projects via `GET /api/projects`.
 
 ## Step 1: Check health

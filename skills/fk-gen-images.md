@@ -2,6 +2,16 @@ Generate scene images for all scenes in a video.
 
 Usage: `/fk-gen-images <project_id> <video_id>`
 
+## Provider (optional)
+
+Usage: `/fk-gen-images <project_id> <video_id> [--provider <name>]`
+
+Pass `"provider": "<name>"` on each item in the `/api/requests/batch`
+payload (`flow` | `assistant` | `muse2api`; default is the server `DEFAULT_PROVIDER`).
+The assistant provider queues a provider job — make sure a worker is running
+(see `/fk-provider`). Assistant image output lands as `file://` URLs, which
+never expire.
+
 If not provided, ask or list projects/videos.
 
 ## Step 0: Detect orientation

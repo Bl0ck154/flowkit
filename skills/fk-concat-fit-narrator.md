@@ -308,6 +308,50 @@ Per-scene breakdown:
   Total saved: XXs
 ```
 
+## Step 9: Multi-Chapter Cinematic Master Film Assembly (`--master`)
+
+When producing an episodic or multi-chapter film (e.g., Chapters 1 through 5), this stage compiles all independent chapter masters into a seamless **Cinematic Master Film**:
+
+```bash
+# Execute master compilation across all chapters
+python scripts/build_master_film.py \
+  --project-dir output/<slug> \
+  --chapters 1 2 3 4 5 \
+  --output output/<slug>/<slug>_CINEMATIC_MASTER.mp4
+```
+
+### Standard 4-Step Technical Workflow:
+
+1. **Chapter Interstitial Bumpers (3.5s duration):**
+   - Renders 1280x720 / 3840x2160 title plates featuring an obsidian background `#08080A`, antique gold dividing line `#B4914B`, and dignified Serif typography (`timesbd.ttf`).
+   - Ken Burns motion dynamics: micro-zoom from 1.0x to 1.04x over 3.5s (`zoompan=z='min(zoom+0.0003,1.04)':d=88:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`).
+   - Integrated acoustic tone: 40–60Hz Brown noise sub-bass drone creating a solemn, cinematic atmosphere.
+
+2. **Dip-to-Black Transitions:**
+   - Outgoing chapter tail: 0.8s fade-out to black (`fade=t=out:st=<DUR-0.8>:d=0.8` and `afade=t=out:st=<DUR-0.8>:d=0.8`).
+   - Incoming chapter head: 0.8s fade-in from black (`fade=t=in:st=0:d=0.8` and `afade=t=in:st=0:d=0.8`).
+   - Interstitial bumper inserted between chapters as an acoustic and visual bridge.
+
+3. **Cinematic Multi-Layer Audio Balance:**
+   - **TTS Voice Narration:** `volume=1.40` (+2.9 dB boost for presence and intelligibility).
+   - **Veo 3 Ambient / Foley:** `volume=0.25` (-12 dB ducking so background noise never interferes with spoken dialogue).
+   - **Bumper Drone / Chapter Stinger:** `volume=0.50` (Resonant and deep without causing distortion).
+
+4. **Automated Subtitle & Hardsub Generation (`scripts/generate_subtitles.py`):**
+   - Automatically computes timeline timestamps from scene durations and narrator text.
+   - Generates standard `.srt` (for YouTube CC / VLC) and `.vtt` (for web players).
+   - Burns hardsubs directly into frames with custom styling presets:
+   ```bash
+   python scripts/generate_subtitles.py \
+     --project-dir output/<slug> \
+     --burn-subtitles \
+     --input-video output/<slug>/<slug>_CINEMATIC_MASTER.mp4 \
+     --style cinematic_gold
+   ```
+   - **Styles:** `cinematic_gold` (Antique Gold text `#E6C280` with dark shadow), `clean_white` (Crisp White `#FFFFFF`), `cyber_amber` (Amber Gold), `emerald_hud` (Sci-Fi HUD Green).
+
+---
+
 ## Common Issues
 
 | Issue | Cause | Fix |
@@ -318,3 +362,6 @@ Per-scene breakdown:
 | Scene order wrong | Not sorted by display_order | Sort scenes before processing |
 | TTS file not found | Wrong path or naming mismatch | Check both TTS path patterns |
 | Abrupt video cut | No fade-out at trim point | Add optional `-af "afade=t=out:st={CUT_DUR-0.3}:d=0.3"` |
+| Bumper audio missing | Video concat without audio stream | Always include an audio stream with bumpers (drone or silent evaluation stream) |
+
+

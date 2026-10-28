@@ -4,15 +4,18 @@ Flow Client — communicates with Google Flow via the Chrome extension bridge.
 Agent runs a WS server. Extension connects as client. Agent sends requests,
 extension executes them in browser context (residential IP, cookies, reCAPTCHA).
 
-Two transports live here. The current one is Flow's ``batchexecute`` endpoint on
-flow.google.com, whose calls only a signed-in page can sign — the agent builds
-the envelope, the extension runs it in the tab (see :mod:`agent.services.flow_batch`).
-The old REST path against ``aisandbox-pa.googleapis.com`` is kept behind
-``USE_BATCH_RPC=0``; it needs a ``Bearer ya29.…`` that Flow stopped minting in
-the September 2026 migration, so it is a post-mortem tool, not a fallback.
+One transport: Flow's ``batchexecute`` endpoint on flow.google.com, whose calls
+only a signed-in page can sign — the agent builds the envelope, the extension
+runs it in the tab (see :mod:`agent.services.flow_batch`).
 
-Both shape their answers the same way, so everything downstream — the worker's
-parsers, the operation poller, the scene/character updaters — is transport-blind.
+The REST path against ``aisandbox-pa.googleapis.com`` that preceded it is gone.
+It needed a ``Bearer ya29.…`` that Flow stopped minting in the September 2026
+migration, so it could not run; keeping it only gave the next contributor a
+second place to implement things. Git history has it if a payload is ever needed.
+
+Answers are shaped like the old REST ones, so everything downstream — the
+worker's parsers, the operation poller, the scene/character updaters — reads one
+shape and never learns where it came from.
 """
 import asyncio
 import json
@@ -22,26 +25,20 @@ import uuid
 from typing import Optional
 
 from agent.config import (
-    GOOGLE_FLOW_API, GOOGLE_API_KEY, ENDPOINTS,
-    VIDEO_MODELS, UPSCALE_MODELS, IMAGE_MODELS, VIDEO_POLL_TIMEOUT,
-    USE_BATCH_RPC, FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
+    VIDEO_MODELS, UPSCALE_MODELS,
+    FLOW_PROJECT_ID, FLOW_ALLOW_DEGRADED,
     DEFAULT_PAYGATE_TIER,
     FLOW_GENERATION_MIN_INTERVAL_S, FLOW_GENERATION_MAX_CONCURRENT,
-    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, FLOW_RISK_STATE_FILE,
+    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, FLOW_GENERATION_HOLD_PATH,
 )
 from agent import config as _config
 from agent.services import flow_batch as fb
-from agent.services.browser_session import inspect_flow_session, inspect_flow_credits, run_flow_batch_rpc
-from agent.services.flow_playwright_generation import run_flow_playwright_generation as run_flow_ui_generation
-from agent.services.headers import random_headers
 
 logger = logging.getLogger(__name__)
 
-# Captured from the current Flow image composer. x4 does not fire four ogiZ0b
-# requests at the same instant: requests start at roughly 0.0s, 0.5s, 1.5s,
-# and 2.5s. Keeping the same short launch cadence materially reduces transient
-# RPC [8] failures for GEM_PIX_2 while the actual generations still run in
-# parallel on Google's side.
+# Captured from the current Flow image composer. x4 launches independent
+# ogiZ0b requests at roughly 0.0s, 0.5s, 1.5s and 2.5s rather than bursting
+# all variants at once. The generation work still overlaps after submission.
 IMAGE_UI_SUBMIT_OFFSETS_S = (0.0, 0.5, 1.5, 2.5)
 
 # RPC [8] is a transient Flow-side generation rejection seen under image load.
@@ -69,64 +66,21 @@ class FlowClient:
         self._operation_projects: dict[str, str] = {}
         self._operation_media: dict[str, str] = {}
         self._operation_polls: dict[str, int] = {}
-        # Last project resolved for a batchexecute request. The direct-CDP
-        # runner uses it to keep Chrome on the matching Flow project page.
+        # Remember the most recently resolved Flow project for legacy calls.
         self._batch_active_project: Optional[str] = None
-        # Global generation throttle. Unlike the worker limiter, this also
-        # covers direct API calls and other integrations that share FlowClient.
         self._generation_slots = asyncio.Semaphore(FLOW_GENERATION_MAX_CONCURRENT)
         self._generation_rate_gate = asyncio.Lock()
         self._generation_last_submit_at = 0.0
         self._generation_unusual_until = 0.0
         self._generation_last_unusual_at: Optional[float] = None
         self._generation_last_unusual_rpc: Optional[str] = None
-        self._restore_generation_risk_state()
+        self._generation_hold_reason: Optional[str] = None
+        self._load_generation_hold()
         # WS stats
         self._ws_connect_count = 0
         self._ws_disconnect_count = 0
         self._ws_connected_at: Optional[float] = None
         self._ws_last_disconnect_at: Optional[float] = None
-
-    def _restore_generation_risk_state(self) -> None:
-        """Restore a Google unusual-activity cooldown across agent restarts."""
-        if FLOW_RISK_STATE_FILE is None:
-            return
-        try:
-            payload = json.loads(FLOW_RISK_STATE_FILE.read_text(encoding="utf-8"))
-            last_at = payload.get("last_unusual_activity_at")
-            last_rpc = payload.get("last_unusual_activity_rpc")
-            until_epoch = float(payload.get("cooldown_until_epoch") or 0.0)
-            self._generation_last_unusual_at = float(last_at) if last_at is not None else None
-            self._generation_last_unusual_rpc = str(last_rpc) if last_rpc else None
-            remaining = max(0.0, until_epoch - time.time())
-            if remaining > 0:
-                self._generation_unusual_until = time.monotonic() + remaining
-                logger.warning(
-                    "Restored Google unusual-activity cooldown from disk; %.0fs remaining",
-                    remaining,
-                )
-        except FileNotFoundError:
-            return
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            logger.warning("Could not restore Flow generation risk state: %s", exc)
-
-    def _persist_generation_risk_state(self) -> None:
-        """Atomically persist non-secret WAF cooldown metadata."""
-        if FLOW_RISK_STATE_FILE is None:
-            return
-        remaining = max(0.0, self._generation_unusual_until - time.monotonic())
-        payload = {
-            "last_unusual_activity_at": self._generation_last_unusual_at,
-            "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
-            "cooldown_until_epoch": time.time() + remaining,
-        }
-        try:
-            FLOW_RISK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = FLOW_RISK_STATE_FILE.with_name(FLOW_RISK_STATE_FILE.name + ".tmp")
-            tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-            tmp.replace(FLOW_RISK_STATE_FILE)
-        except OSError as exc:
-            logger.warning("Could not persist Flow generation risk state: %s", exc)
 
     def set_extension(self, ws):
         """Called when extension connects via WS."""
@@ -254,12 +208,66 @@ class FlowClient:
     def connected(self) -> bool:
         return bool(self._extensions)
 
+    def _set_generation_hold(self, seconds: float, reason: str, rpcid: str) -> None:
+        """Stop generation submits for ``seconds`` and record it on disk, so a
+        restart keeps the hold. A longer hold already in place is kept, with
+        its reason."""
+        until = time.monotonic() + seconds
+        if until <= self._generation_unusual_until:
+            return
+        self._generation_unusual_until = until
+        self._generation_last_unusual_at = time.time()
+        self._generation_last_unusual_rpc = rpcid
+        self._generation_hold_reason = reason
+        tmp = FLOW_GENERATION_HOLD_PATH.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps({
+                "until": time.time() + seconds,
+                "reason": reason,
+                "rpc": rpcid,
+                "at": self._generation_last_unusual_at,
+            }))
+            tmp.replace(FLOW_GENERATION_HOLD_PATH)
+        except OSError as exc:
+            logger.warning("Could not persist the generation hold: %s", exc)
+
+    def _load_generation_hold(self) -> None:
+        try:
+            hold = json.loads(FLOW_GENERATION_HOLD_PATH.read_text())
+            remaining = float(hold["until"]) - time.time()
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Ignoring unreadable generation hold %s: %s",
+                           FLOW_GENERATION_HOLD_PATH, exc)
+            return
+        if remaining <= 0:
+            return
+        self._generation_unusual_until = time.monotonic() + remaining
+        self._generation_last_unusual_at = hold.get("at")
+        self._generation_last_unusual_rpc = hold.get("rpc")
+        self._generation_hold_reason = hold.get("reason")
+        logger.warning("Generation hold restored from disk (%s): %.0fs left",
+                       self._generation_hold_reason, remaining)
+
+    def clear_generation_hold(self) -> bool:
+        """Lift the hold by hand. Returns whether one was active."""
+        was_active = self._generation_unusual_until > time.monotonic()
+        self._generation_unusual_until = 0.0
+        self._generation_hold_reason = None
+        try:
+            FLOW_GENERATION_HOLD_PATH.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove the generation hold file: %s", exc)
+        return was_active
+
     @property
     def generation_guard_status(self) -> dict:
         remaining = max(0.0, self._generation_unusual_until - time.monotonic())
         return {
             "cooldown_active": remaining > 0,
             "cooldown_remaining_s": round(remaining, 3),
+            "cooldown_reason": self._generation_hold_reason if remaining > 0 else None,
             "last_unusual_activity_at": self._generation_last_unusual_at,
             "last_unusual_activity_rpc": self._generation_last_unusual_rpc,
         }
@@ -437,17 +445,8 @@ class FlowClient:
 
         The batch path can do this properly: the media rpc answers a media id
         with a freshly signed url, so we walk the project's scenes and entities
-        and refresh each id we hold. The legacy path could not — its media
-        endpoint returned base64 content rather than a url — so it still asks
-        the user to open the project in Chrome and let the intercept catch them.
+        and refresh each id we hold.
         """
-        if not USE_BATCH_RPC:
-            logger.info("URL refresh requested for project %s — legacy path has no "
-                        "url-serving media endpoint", project_id[:12])
-            return {"refreshed": 0, "found": 0, "note": "Legacy REST path: no URL refresh. "
-                    "Open the project in Google Flow in Chrome and let the extension "
-                    "intercept fresh URLs, or set USE_BATCH_RPC=1."}
-
         from agent.db import crud
 
         # (media_id, kind) -> the scene/character fields it should land in
@@ -503,14 +502,10 @@ class FlowClient:
         if not self.connected:
             return {"error": "Extension not connected"}
 
-        # A bearer token is only worth routing on when something is going to
-        # send one. The batchexecute path authenticates in the page with the
-        # session cookie, so demanding a flow key there would reject every
-        # profile — no profile on that path ever captures one.
-        needs_token = not USE_BATCH_RPC
-        extension_candidates = self._extension_candidates(require_token=needs_token)
-        if not extension_candidates and needs_token:
-            return {"error": "NO_FLOW_KEY"}
+        # No profile needs a bearer any more: batchexecute authenticates in the
+        # page with the session cookie. Demanding a flow key here would reject
+        # every profile, because none on this path ever captures one.
+        extension_candidates = self._extension_candidates(require_token=False)
         if not extension_candidates:
             return {"error": "Extension not connected"}
 
@@ -558,25 +553,6 @@ class FlowClient:
 
         return last_result
 
-    def _build_url(self, endpoint_key: str, **kwargs) -> str:
-        """Build full API URL."""
-        path = ENDPOINTS[endpoint_key].format(**kwargs)
-        sep = "&" if "?" in path else "?"
-        return f"{GOOGLE_FLOW_API}{path}{sep}key={GOOGLE_API_KEY}"
-
-    def _client_context(self, project_id: str, user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Build clientContext with recaptcha placeholder."""
-        return {
-            "projectId": str(project_id),
-            "recaptchaContext": {
-                "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                "token": "",  # Extension injects real token
-            },
-            "sessionId": f";{int(time.time() * 1000)}",
-            "tool": "PINHOLE",
-            "userPaygateTier": user_paygate_tier,
-        }
-
     # ─── batchexecute transport ──────────────────────────────
     #
     # Flow's rewritten frontend signs every call with the session cookie plus a
@@ -584,37 +560,64 @@ class FlowClient:
     # None of that can be replayed from here, so the agent builds the envelope
     # and the extension runs it inside a signed-in flow.google.com tab.
 
+    async def _dispatch_browser_rpc(
+        self, rpcid: str, freq: str, params: dict, *,
+        captcha_action: str | None, match: str | None,
+        custom_path: str | None, timeout: float,
+    ) -> dict:
+        """Use the standard extension or an explicitly enabled local UI backend.
+
+        In local UI mode, supported generation RPCs submit via the real Flow
+        composer. Other RPCs go through its signed-in Chrome CDP session.
+        Custom StreamChat paths remain on the extension bridge.
+        """
+        if _config.FLOW_BROWSER_BACKEND == "extension" or custom_path:
+            return await self._send("batch_rpc", params, timeout=timeout)
+
+        if rpcid in {
+            fb.RPC_GEN_IMAGE, fb.RPC_GEN_VIDEO, fb.RPC_GEN_VIDEO_TEXT,
+            fb.RPC_GEN_VIDEO_FIRST_LAST, fb.RPC_GEN_VIDEO_REFERENCES,
+        }:
+            from agent.services.flow_playwright_generation import run_flow_playwright_generation
+            return await run_flow_playwright_generation(
+                rpcid, freq,
+                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                timeout=timeout,
+            )
+
+        from agent.services.browser_session import run_flow_batch_rpc
+        return await run_flow_batch_rpc(
+            rpcid, freq,
+            captcha_action=captcha_action, match=match,
+            project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+            timeout=timeout,
+        )
+
     async def batch_rpc(self, rpcid: str, freq: str,
                         captcha_action: str | None = None,
                         match: str | None = None,
+                        custom_path: str | None = None,
                         timeout: float = 300) -> dict:
         """Run one batchexecute RPC in the Flow page. Returns the raw body.
 
-        ``match`` asks the extension to cut the response down to an 800-byte
-        window around that string before handing it back. The project listing
-        is tens of megabytes for the one entry we want, and the cheapest place
-        to throw the rest away is inside the tab.
+        CAPTCHA-bearing image/video submits pass through one process-wide guard
+        so direct API callers cannot accidentally bypass the worker limiter.
+        Non-generation RPCs (polling/media/project metadata) remain unthrottled.
         """
-        # Run in the signed-in Flow page through Chrome DevTools. This keeps
-        # the new transport independent of which MV3 package version Chrome
-        # currently has installed; the extension remains responsible for the
-        # legacy bridge and telemetry, while cookies/CSRF/reCAPTCHA stay in-page.
-        generation_rpcs = {
-            fb.RPC_GEN_IMAGE,
-            fb.RPC_GEN_VIDEO,
-            fb.RPC_GEN_VIDEO_TEXT,
-            fb.RPC_GEN_VIDEO_FIRST_LAST,
-            fb.RPC_GEN_VIDEO_REFERENCES,
-        }
-        is_generation = rpcid in generation_rpcs
+        params: dict = {"rpcid": rpcid, "freq": freq}
+        if captcha_action:
+            params["captchaAction"] = captcha_action
+        if match:
+            params["match"] = match
+        if custom_path:
+            params["customPath"] = custom_path
+
+        is_generation = captcha_action in {fb.CAPTCHA_IMAGE, fb.CAPTCHA_VIDEO}
         if not is_generation:
-            return await run_flow_batch_rpc(
-                rpcid,
-                freq,
-                captcha_action=captcha_action,
-                match=match,
-                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
-                timeout=timeout,
+            return await self._dispatch_browser_rpc(
+                rpcid, freq, params,
+                captcha_action=captcha_action, match=match,
+                custom_path=custom_path, timeout=timeout,
             )
 
         now = time.monotonic()
@@ -630,9 +633,6 @@ class FlowClient:
 
         await self._generation_slots.acquire()
         try:
-            # Serialize the launch gate even if the configured concurrency is
-            # raised later. This spaces CAPTCHA mints / generation dispatches
-            # while still allowing already-submitted backend jobs to run.
             async with self._generation_rate_gate:
                 now = time.monotonic()
                 if now < self._generation_unusual_until:
@@ -644,29 +644,44 @@ class FlowClient:
                             f"retry in about {remaining}s"
                         ),
                     }
-                delay = FLOW_GENERATION_MIN_INTERVAL_S - (now - self._generation_last_submit_at)
+                delay = FLOW_GENERATION_MIN_INTERVAL_S - (
+                    now - self._generation_last_submit_at
+                )
                 if delay > 0:
                     await asyncio.sleep(delay)
                 self._generation_last_submit_at = time.monotonic()
 
-            result = await run_flow_ui_generation(
-                rpcid,
-                freq,
-                project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
-                timeout=timeout,
+            result = await self._dispatch_browser_rpc(
+                rpcid, freq, params,
+                captcha_action=captcha_action, match=match,
+                custom_path=custom_path, timeout=timeout,
             )
             blob = f"{result.get('error', '')} {result.get('data', '')}"
-            if (
+            is_hijack = "extension_hijack" in blob.lower()
+            is_unusual = (
                 "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in blob
                 or "unusual activity" in blob.lower()
-            ):
-                self._generation_unusual_until = max(
-                    self._generation_unusual_until,
-                    time.monotonic() + FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
+            )
+            if is_hijack:
+                # x2a trap: the token was poisoned with action
+                # "extension_hijack_detected". This is a system-level trap,
+                # NOT an account issue — don't apply the long cooldown.
+                # Short pause lets the bypass re-initialise on next tab; the
+                # worker gives up on the request after a few of these.
+                self._set_generation_hold(30.0, "extension_hijack_detected", rpcid)
+                logger.error(
+                    "[HIJACK] extension_hijack_detected — captcha bypass may "
+                    "have failed; pausing generation submits for 30s"
                 )
-                self._generation_last_unusual_at = time.time()
-                self._generation_last_unusual_rpc = rpcid
-                self._persist_generation_risk_state()
+                # Tag the result so processor can distinguish it
+                if isinstance(result.get("error"), str):
+                    result["error"] = f"[HIJACK] {result['error']}"
+                else:
+                    result["error"] = "[HIJACK] extension_hijack_detected"
+            elif is_unusual:
+                self._set_generation_hold(
+                    FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, "unusual_activity", rpcid,
+                )
                 logger.warning(
                     "Google unusual-activity block detected; pausing generation submits for %.0fs",
                     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S,
@@ -674,6 +689,18 @@ class FlowClient:
             return result
         finally:
             self._generation_slots.release()
+
+    async def stream_chat(self, prompt: str, project_id: str | None = None, timeout: float = 120) -> dict:
+        """Submit a prompt via FlowCreationAgentService/StreamChat."""
+        pid = self._batch_project_id(project_id)
+        freq = fb.stream_chat_request(prompt, pid)
+        return await self.batch_rpc(
+            "StreamChat",
+            freq,
+            captcha_action="CHAT_GENERATION",
+            custom_path=fb.STREAM_CHAT_PATH,
+            timeout=timeout,
+        )
 
     async def _batch_payload(self, rpcid: str, freq: str,
                              captcha_action: str | None = None,
@@ -689,7 +716,8 @@ class FlowClient:
 
         Flow Kit stores the Flow project uuid as the local project id. Public
         direct endpoints resolve project-less work through the persistent
-        session-project lease before reaching this lower-level helper.
+        session-project lease before reaching this lower-level helper. The
+        legacy FLOW_PROJECT_ID fallback remains for older internal callers.
         """
         if project_id and self._UUID_RE.match(str(project_id)):
             resolved = str(project_id)
@@ -728,11 +756,9 @@ class FlowClient:
             return
         if len(self._operation_projects) > 512:
             self._operation_projects.clear()
-            self._operation_media.clear()
-            self._operation_polls.clear()
         self._operation_projects[operation_id] = project_id
 
-    # ─── High-level API Methods ──────────────────────────────
+    # ─── High-Level Batch Methods ────────────────────────────────
 
     def flow_project_id(self, requested: str | None = None) -> str | None:
         """Validate an explicitly requested Flow project id."""
@@ -741,8 +767,6 @@ class FlowClient:
         return None
 
     async def create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
-        if not USE_BATCH_RPC:
-            return await self._legacy_create_project(project_title, tool_name)
         try:
             result = await self.batch_rpc(
                 fb.RPC_CREATE_PROJECT,
@@ -761,14 +785,14 @@ class FlowClient:
         except Exception as exc:
             return _batch_error(exc)
 
-    async def generate_images(self, prompt: str, project_id: str,
-                               aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None,
-                               image_model: str = None,
-                               count: int = 1,
-                               seed: int | None = None,
-                               base_media_id: str | None = None) -> dict:
+    async def generate_images(self, prompt: str, project_id: str = None,
+                                character_media_ids: list[str] = None,
+                                aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
+                                user_paygate_tier: str = "PAYGATE_TIER_TWO",
+                                image_model: str = None,
+                                count: int = 1,
+                                seed: int | None = None,
+                                base_media_id: str | None = None) -> dict:
         """Generate image(s).
 
         ``character_media_ids`` are attached as reference images, which is what
@@ -776,9 +800,6 @@ class FlowClient:
         old REST one so the parsers downstream do not have to care which
         transport produced it.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_images(
-                prompt, project_id, aspect_ratio, user_paygate_tier, character_media_ids)
 
         try:
             if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 4:
@@ -877,15 +898,10 @@ class FlowClient:
                           seed: int | None = None) -> dict:
         """Edit an image with the source encoded as Flow's BASE_IMAGE input.
 
-        Additional references remain REFERENCE inputs. The distinction matters:
-        sending the source as a generic reference conditions a fresh generation,
-        while BASE_IMAGE is the wire shape the current Flow editor uses for an
-        actual image edit/refine request.
+        Additional references remain REFERENCE inputs. Sending the source as a
+        generic reference conditions a fresh generation; BASE_IMAGE is the wire
+        shape the current Flow editor uses for an actual image edit/refine.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_edit_image(
-                prompt, source_media_id, project_id, aspect_ratio,
-                user_paygate_tier, character_media_ids)
 
         refs = [mid for mid in (character_media_ids or []) if mid != source_media_id]
         return await self.generate_images(
@@ -903,8 +919,6 @@ class FlowClient:
     async def upscale_image(self, media_id: str, project_id: str,
                             resolution: str = "2K") -> dict:
         """Return Flow's synchronous 2K/4K image upscale as base64 JPEG data."""
-        if not USE_BATCH_RPC:
-            return {"status": 400, "error": "Image upscale requires the flow.google.com batch transport"}
         try:
             pid = self._batch_project_id(project_id)
             freq = fb.image_upscale_request(media_id, resolution)
@@ -934,10 +948,6 @@ class FlowClient:
                               end_image_media_id: str = None,
                               user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
         """Submit an i2v generation. Returns operations for the poller."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_video(
-                start_image_media_id, prompt, project_id, scene_id,
-                aspect_ratio, end_image_media_id, user_paygate_tier)
 
         if end_image_media_id:
             if not FLOW_ALLOW_DEGRADED:
@@ -971,10 +981,6 @@ class FlowClient:
                                               aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
                                               user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
         """Generate video from multiple reference images (r2v)."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_generate_video_from_references(
-                reference_media_ids, prompt, project_id, scene_id,
-                aspect_ratio, user_paygate_tier)
 
         if not FLOW_ALLOW_DEGRADED:
             return {"error": _unsupported(
@@ -994,42 +1000,25 @@ class FlowClient:
         )
 
     async def upscale_video(self, media_id: str, scene_id: str,
-                             aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                             resolution: str = "VIDEO_RESOLUTION_4K",
-                             project_id: str | None = None) -> dict:
-        """Upscale/export a video using Flow's migrated p0UkFb RPC."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_upscale_video(media_id, scene_id, aspect_ratio, resolution)
-
+                            aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
+                            resolution: str = "VIDEO_RESOLUTION_4K",
+                            project_id: str | None = None) -> dict:
+        """Submit Flow's native high-resolution video export through p0UkFb."""
         model = UPSCALE_MODELS.get(resolution)
         if not model:
             return {"status": 400, "error": f"Unsupported upscale resolution: {resolution}"}
 
         try:
-            requested_project = project_id or self._batch_active_project or FLOW_PROJECT_ID
-            if not requested_project:
-                session = await inspect_flow_session()
-                url = session.get("url", "") if isinstance(session, dict) else ""
-                if "/project/" in url:
-                    candidate = url.split("/project/", 1)[1].split("/", 1)[0].split("?", 1)[0]
-                    if self._UUID_RE.match(candidate):
-                        requested_project = candidate
-            pid = self._batch_project_id(requested_project or "")
-            freq = fb.upscale_request(
-                media_id,
-                pid,
-                aspect=aspect_ratio,
-                model=model,
-            )
+            pid = self._batch_project_id(project_id or "")
             payload = await self._batch_payload(
                 fb.RPC_UPSCALE,
-                freq,
+                fb.upscale_request(media_id, pid, aspect=aspect_ratio, model=model),
                 fb.CAPTCHA_VIDEO,
                 timeout=120,
             )
             upscaled_media_id = fb.read_upscaled_media_id(payload)
-        except Exception as e:
-            return _batch_error(e)
+        except Exception as exc:
+            return _batch_error(exc)
 
         workflow = {
             "name": upscaled_media_id,
@@ -1058,8 +1047,6 @@ class FlowClient:
         Everything short of that is PENDING, and the caller's own poll loop
         owns the timeout.
         """
-        if not USE_BATCH_RPC:
-            return await self._legacy_check_video_status(operations)
 
         out = []
         for entry in operations or []:
@@ -1084,9 +1071,14 @@ class FlowClient:
             media_id, complaint = await self._find_operation_media(operation_id)
             if not media_id:
                 return _as_pending_operation(operation_id, error=complaint)
+            logger.info("Matched media_id=%s for op=%s", media_id, operation_id)
             self._operation_media[operation_id] = media_id
 
-        urls = await self._batch_media_urls(media_id)
+        try:
+            urls = await self._batch_media_urls(media_id)
+        except Exception:
+            self._operation_media.pop(operation_id, None)
+            raise
         if not urls.video:
             # The id landed but the clip is still being written; downloading
             # now would save the poster still instead of the video.
@@ -1116,6 +1108,15 @@ class FlowClient:
         self._operation_polls[operation_id] = rounds
 
         project_id = self._operation_projects.get(operation_id) or FLOW_PROJECT_ID
+        if not project_id:
+            try:
+                from agent.db import crud
+                req = await crud.get_request_by_operation_id(operation_id)
+                if req and req.get("project_id"):
+                    project_id = req["project_id"]
+                    self._remember_operation(operation_id, project_id)
+            except Exception:
+                pass
         complaint = None
         worth_looking = rounds % 3 == 0
         try:
@@ -1172,10 +1173,18 @@ class FlowClient:
         return fb.read_media_urls(payload, media_id)
 
     async def get_credits(self, refresh: bool = False) -> dict:
-        """Get the visible Flow credit balance plus the configured wire tier."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_get_credits()
-        snapshot = await inspect_flow_credits(refresh=refresh)
+        """Return the visible account balance when a signed-in browser is available.
+
+        There is no dedicated captured credits RPC; an unavailable browser must
+        not be misrepresented as having zero credits.
+        """
+        snapshot: dict = {"balance": None, "plan": None, "source": "unavailable"}
+        if self.connected:
+            try:
+                from agent.services.browser_session import inspect_flow_credits
+                snapshot = await inspect_flow_credits(refresh=refresh)
+            except Exception as exc:
+                logger.warning("Could not inspect Flow credits: %s", exc)
         return {"status": 200, "data": {
             "balance": snapshot.get("balance"),
             "plan": snapshot.get("plan"),
@@ -1183,10 +1192,7 @@ class FlowClient:
             "cached": snapshot.get("cached", False),
             "age_s": snapshot.get("age_s"),
             "userPaygateTier": DEFAULT_PAYGATE_TIER,
-            "note": (
-                "balance is read from Flow's signed-in account panel; "
-                "userPaygateTier remains FlowKit configuration"
-            ),
+            "note": "Balance comes from the signed-in Flow account panel when available.",
         }}
 
     async def validate_media_id(self, media_id: str) -> bool:
@@ -1197,8 +1203,6 @@ class FlowClient:
 
     async def get_media(self, media_id: str) -> dict:
         """Fetch a media record, which is where a fresh signed url lives."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_get_media(media_id)
         try:
             urls = await self._batch_media_urls(media_id)
         except Exception as e:
@@ -1212,11 +1216,24 @@ class FlowClient:
             data["image"] = {"fifeUrl": urls.image}
         return {"status": 200, "data": data}
 
+    async def resolve_media_url(self, media_id: str) -> dict:
+        """Resolve a signed Flow video URL without buffering video bytes."""
+        result = await self.get_media(media_id)
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        video = data.get("video") if isinstance(data, dict) else None
+        candidate = video.get("fifeUrl") if isinstance(video, dict) else None
+        return {
+            "status": result.get("status", 200),
+            "data": {
+                "url": candidate,
+                "contentType": "video/mp4" if candidate else None,
+            },
+            "error": result.get("error"),
+        }
+
     async def upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
                             project_id: str = "", file_name: str = "image.jpg") -> dict:
         """Upload an image into the project so it can be used as a reference."""
-        if not USE_BATCH_RPC:
-            return await self._legacy_upload_image(image_base64, mime_type, project_id, file_name)
         try:
             pid = self._batch_project_id(project_id)
             payload = await self._batch_payload(
@@ -1228,317 +1245,6 @@ class FlowClient:
         except Exception as e:
             return _batch_error(e)
         return {"status": 200, "data": {"media": {"name": media_id}}, "_mediaId": media_id}
-
-    # ─── Legacy REST methods (aisandbox-pa, pre-migration) ───
-
-    async def _legacy_create_project(self, project_title: str, tool_name: str = "PINHOLE") -> dict:
-        """Create a project on Google Flow via tRPC endpoint.
-
-        Returns the full response including projectId.
-        """
-        url = "https://labs.google/fx/api/trpc/project.createProject"
-        body = {"json": {"projectTitle": project_title, "toolName": tool_name}}
-
-        return await self._send("trpc_request", {
-            "url": url,
-            "method": "POST",
-            "headers": {
-                "content-type": "application/json",
-                "accept": "*/*",
-            },
-            "body": body,
-        }, timeout=30)
-
-    async def _legacy_generate_images(self, prompt: str, project_id: str,
-                               aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                               user_paygate_tier: str = "PAYGATE_TIER_TWO",
-                               character_media_ids: list[str] = None) -> dict:
-        """Generate image(s).
-
-        If character_media_ids is provided, uses edit_image flow (batchGenerateImages
-        with imageInputs) — same endpoint, but includes character references.
-        Without characters, uses plain generate_images.
-
-        Response structure:
-            data.media[].name = mediaId (used for video gen)
-        """
-        ts = int(time.time() * 1000)
-        ctx = self._client_context(project_id, user_paygate_tier)
-
-        request_item = {
-            "clientContext": {**ctx, "sessionId": f";{ts}"},
-            "seed": ts % 1000000,
-            "structuredPrompt": {"parts": [{"text": prompt}]},
-            "imageAspectRatio": aspect_ratio,
-            "imageModelName": IMAGE_MODELS["NANO_BANANA_PRO"],
-        }
-
-        # Add character references if provided (edit_image flow)
-        if character_media_ids:
-            request_item["imageInputs"] = [
-                {"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"}
-                for mid in character_media_ids
-            ]
-
-        batch_id = f"{uuid.uuid4()}" if character_media_ids else None
-        body = {
-            "clientContext": ctx,
-            "requests": [request_item],
-        }
-        if batch_id:
-            body["mediaGenerationContext"] = {"batchId": batch_id}
-            body["useNewMedia"] = True
-
-        url = self._build_url("generate_images", project_id=project_id)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "IMAGE_GENERATION",
-        })
-
-    async def _legacy_edit_image(self, prompt: str, source_media_id: str,
-                          project_id: str,
-                          aspect_ratio: str = "IMAGE_ASPECT_RATIO_PORTRAIT",
-                          user_paygate_tier: str = "PAYGATE_TIER_ONE",
-                          character_media_ids: list[str] = None) -> dict:
-        """Edit an existing image using IMAGE_INPUT_TYPE_BASE_IMAGE.
-
-        If character_media_ids is provided, appends them as IMAGE_INPUT_TYPE_REFERENCE
-        after the base image. Order: [base_image, char_A, char_B, ...].
-        This helps Google Flow detect characters for consistent edits.
-        """
-        ts = int(time.time() * 1000)
-        ctx = self._client_context(project_id, user_paygate_tier)
-
-        image_inputs = [
-            {"name": source_media_id, "imageInputType": "IMAGE_INPUT_TYPE_BASE_IMAGE"}
-        ]
-        if character_media_ids:
-            for mid in character_media_ids:
-                image_inputs.append({"name": mid, "imageInputType": "IMAGE_INPUT_TYPE_REFERENCE"})
-
-        request_item = {
-            "clientContext": {**ctx, "sessionId": f";{ts}"},
-            "seed": ts % 1000000,
-            "structuredPrompt": {"parts": [{"text": prompt}]},
-            "imageAspectRatio": aspect_ratio,
-            "imageModelName": IMAGE_MODELS["NANO_BANANA_PRO"],
-            "imageInputs": image_inputs,
-        }
-
-        body = {
-            "clientContext": ctx,
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "useNewMedia": True,
-            "requests": [request_item],
-        }
-
-        url = self._build_url("generate_images", project_id=project_id)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "IMAGE_GENERATION",
-        })
-
-    async def _legacy_generate_video(self, start_image_media_id: str, prompt: str,
-                              project_id: str, scene_id: str,
-                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                              end_image_media_id: str = None,
-                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Generate video from start image (i2v).
-
-        Two sub-types:
-        - frame_2_video (i2v): startImage only
-        - start_end_frame_2_video (i2v_fl): startImage + endImage (for scene chaining)
-        """
-        gen_type = "start_end_frame_2_video" if end_image_media_id else "frame_2_video"
-        model_key = VIDEO_MODELS.get(user_paygate_tier, {}).get(gen_type, {}).get(aspect_ratio)
-
-        if not model_key:
-            return {"error": f"No model for tier={user_paygate_tier} type={gen_type} ratio={aspect_ratio}"}
-
-        request = {
-            "aspectRatio": aspect_ratio,
-            "seed": int(time.time()) % 10000,
-            "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
-            "videoModelKey": model_key,
-            "startImage": {"mediaId": start_image_media_id},
-            "metadata": {"sceneId": scene_id},
-        }
-
-        if end_image_media_id:
-            request["endImage"] = {"mediaId": end_image_media_id}
-
-        endpoint_key = "generate_video_start_end" if end_image_media_id else "generate_video"
-        body = {
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "clientContext": self._client_context(project_id, user_paygate_tier),
-            "requests": [request],
-            "useV2ModelConfig": True,
-        }
-
-        url = self._build_url(endpoint_key)
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)  # Submit only — polling is separate
-
-    async def _legacy_generate_video_from_references(self, reference_media_ids: list[str],
-                                              prompt: str, project_id: str, scene_id: str,
-                                              aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                                              user_paygate_tier: str = "PAYGATE_TIER_TWO") -> dict:
-        """Generate video from multiple reference images (r2v).
-
-        Uses referenceImages instead of startImage — the model composes
-        a video from all provided reference character images.
-
-        Args:
-            reference_media_ids: List of character media_ids (from uploadImage)
-        """
-        gen_type = "reference_frame_2_video"
-        model_key = VIDEO_MODELS.get(user_paygate_tier, {}).get(gen_type, {}).get(aspect_ratio)
-
-        if not model_key:
-            return {"error": f"No model for tier={user_paygate_tier} type={gen_type} ratio={aspect_ratio}"}
-
-        request = {
-            "aspectRatio": aspect_ratio,
-            "seed": int(time.time()) % 10000,
-            "textInput": {"structuredPrompt": {"parts": [{"text": prompt}]}},
-            "videoModelKey": model_key,
-            "referenceImages": [
-                {"mediaId": mid, "imageUsageType": "IMAGE_USAGE_TYPE_ASSET"}
-                for mid in reference_media_ids
-            ],
-            "metadata": {},
-        }
-
-        body = {
-            "mediaGenerationContext": {"batchId": f"{uuid.uuid4()}"},
-            "clientContext": self._client_context(project_id, user_paygate_tier),
-            "requests": [request],
-            "useV2ModelConfig": True,
-        }
-
-        url = self._build_url("generate_video_references")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)
-
-    async def _legacy_upscale_video(self, media_id: str, scene_id: str,
-                             aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
-                             resolution: str = "VIDEO_RESOLUTION_4K") -> dict:
-        """Upscale a video."""
-        model_key = UPSCALE_MODELS.get(resolution, "veo_3_1_upsampler_4k")
-
-        body = {
-            "clientContext": {
-                "sessionId": f";{int(time.time() * 1000)}",
-                "recaptchaContext": {
-                    "applicationType": "RECAPTCHA_APPLICATION_TYPE_WEB",
-                    "token": "",
-                },
-            },
-            "requests": [{
-                "aspectRatio": aspect_ratio,
-                "resolution": resolution,
-                "seed": int(time.time()) % 100000,
-                "metadata": {"sceneId": scene_id},
-                "videoInput": {"mediaId": media_id},
-                "videoModelKey": model_key,
-            }],
-        }
-
-        url = self._build_url("upscale_video")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-            "captchaAction": "VIDEO_GENERATION",
-        }, timeout=60)
-
-    async def _legacy_check_video_status(self, operations: list[dict]) -> dict:
-        """Check status of video generation operations."""
-        body = {"operations": operations}
-        url = self._build_url("check_video_status")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-        }, timeout=30)  # No captcha needed
-
-    async def _legacy_get_credits(self) -> dict:
-        """Get user credits and tier."""
-        url = self._build_url("get_credits")
-        return await self._send("api_request", {
-            "url": url,
-            "method": "GET",
-            "headers": random_headers(),
-        }, timeout=15)
-
-    async def _legacy_get_media(self, media_id: str) -> dict:
-        """Fetch media metadata from Google Flow.
-
-        Returns the raw API response which contains a fresh signed URL
-        in data.fifeUrl or data.servingUri.
-        """
-        url = f"{GOOGLE_FLOW_API}/v1/media/{media_id}?key={GOOGLE_API_KEY}&clientContext.tool=PINHOLE"
-        return await self._send("api_request", {
-            "url": url,
-            "method": "GET",
-            "headers": random_headers(),
-        }, timeout=15)
-
-    async def _legacy_upload_image(self, image_base64: str, mime_type: str = "image/jpeg",
-                            project_id: str = "", file_name: str = "image.jpg") -> dict:
-        """Upload an image for use as start/end frame.
-
-        Uses /v1/flow/uploadImage endpoint.
-        Response: {media: {name: "uuid", ...}, workflow: {...}}
-        We store media.name as the mediaId for video generation.
-        """
-        body = {
-            "clientContext": {
-                "projectId": project_id,
-                "tool": "PINHOLE",
-            },
-            "fileName": file_name,
-            "imageBytes": image_base64,
-            "isHidden": False,
-            "isUserUploaded": True,
-            "mimeType": mime_type,
-        }
-
-        url = self._build_url("upload_image")
-        result = await self._send("api_request", {
-            "url": url,
-            "method": "POST",
-            "headers": random_headers(),
-            "body": body,
-        }, timeout=60)
-
-        # Extract media.name for convenience (used as mediaId in video gen)
-        if not _is_ws_error(result):
-            data = result.get("data", {})
-            if isinstance(data, dict):
-                media = data.get("media", {})
-                if isinstance(media, dict) and media.get("name"):
-                    result["_mediaId"] = media["name"]
-
-        return result
 
 # ─── Response shaping ────────────────────────────────────────
 #

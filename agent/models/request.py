@@ -11,6 +11,7 @@ class RequestCreate(BaseModel):
     project_id: Optional[str] = None
     video_id: Optional[str] = None
     source_media_id: Optional[str] = None
+    provider: Optional[str] = None  # media provider backend: flow | assistant | ...
 
     @model_validator(mode="after")
     def check_required_fields(self) -> "RequestCreate":
@@ -46,5 +47,6 @@ class Request(BaseModel):
     error_message: Optional[str] = None
     retry_count: int = 0
     source_media_id: Optional[str] = None
+    provider: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

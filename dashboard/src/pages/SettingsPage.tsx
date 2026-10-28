@@ -194,7 +194,7 @@ export default function SettingsPage() {
             {Object.entries(providers).map(([name, info]) => (
               <div key={name} className="flex items-center gap-3 text-[11px]">
                 <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: info.installed ? 'var(--green)' : 'var(--red)' }} />
-                <span style={{ width: 90 }}>{info.binary}</span>
+                <span style={{ width: 90 }}>{info.binary ?? name}</span>
                 <span style={{ color: 'var(--muted)', width: 100 }}>
                   {info.installed ? t('settings.providers.installed') : t('settings.providers.missing')}
                 </span>
@@ -252,7 +252,7 @@ export default function SettingsPage() {
                   >
                     {Object.entries(providers).map(([name, p]) => (
                       <option key={name} value={name} disabled={!p.installed}>
-                        {p.installed ? p.binary : `${p.binary} · ${t('settings.notInstalled')}`}
+                        {p.installed ? (p.binary ?? name) : `${p.binary} · ${t('settings.notInstalled')}`}
                       </option>
                     ))}
                   </select>
