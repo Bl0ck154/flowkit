@@ -19,6 +19,7 @@ from agent.services.browser_session import (
 from agent.services.image_capabilities import image_capabilities
 from agent import config as _config
 from agent.api.debug_gate import DEBUG
+from agent.services import remote_flow_worker
 from agent.services.flow_project_session import current_session_project, ensure_session_project
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -173,7 +174,7 @@ async def _resolve_direct_project(client, project_id: str) -> str:
     if pid:
         return pid
     try:
-        session = await ensure_session_project(client)
+        session = await ensure_session_project(client, scope=remote_flow_worker.project_scope())
     except Exception as exc:
         raise HTTPException(502, f"Could not create Flow session project: {exc}") from exc
     pid = str(session.get("project_id") or "")
@@ -212,6 +213,7 @@ async def extension_status():
             **client.generation_guard_status,
         },
         "session_project": current_session_project(),
+        "remote_worker": remote_flow_worker.status(),
     }
 
 
@@ -227,6 +229,14 @@ async def clear_hijack_cooldown():
         "cleared": True,
         "was_active": get_flow_client().clear_generation_hold(),
     }
+
+
+@router.get("/remote-worker-debug", dependencies=DEBUG)
+async def remote_worker_debug(project_id: str):
+    result = await remote_flow_worker.run_remote_ui_debug(project_id)
+    if result.get("error"):
+        raise HTTPException(_safe_status_code(result.get("status")), result["error"])
+    return result
 
 
 @router.post("/ensure-session")

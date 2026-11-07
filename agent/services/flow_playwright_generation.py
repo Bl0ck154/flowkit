@@ -86,10 +86,21 @@ async def _dismiss_overlays(page: Any) -> None:
 async def _open_settings(page: Any) -> Any:
     settings = page.locator("button.settings-trigger-button").first
     await settings.wait_for(state="visible", timeout=10_000)
-    radios = page.locator('button[role="radio"]:visible')
-    if await radios.count() == 0:
+
+    # Do not treat an arbitrary visible role=radio elsewhere on the page as
+    # proof that the generation settings panel is open. New Flow cohorts can
+    # expose unrelated radio controls in the project UI. The panel is open
+    # only when one of its mode toggles (Image / Video) is visible.
+    image_mode = page.locator('button[role="radio"]:visible').filter(
+        has=page.locator("mat-icon", has_text="image")
+    ).first
+    video_mode = page.locator('button[role="radio"]:visible').filter(
+        has=page.locator("mat-icon", has_text="videocam")
+    ).first
+    if not await image_mode.count() and not await video_mode.count():
         await settings.click()
         await page.wait_for_timeout(400)
+        await image_mode.wait_for(state="visible", timeout=8_000)
     return settings
 
 
