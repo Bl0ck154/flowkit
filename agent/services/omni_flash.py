@@ -24,11 +24,13 @@ from pathlib import Path
 
 from agent.services import flow_batch as fb
 from agent.services.flow_client import get_flow_client
+from agent.services.omni_model_versions import OMNI_11_DURATIONS, OMNI_12_DURATIONS, estimate_omni_12_credits
+from agent import config as _config
 from agent.services.flow_poll import check_workflow_status, extract_workflows
 
 _MODELS_FILE = Path(__file__).parent.parent / "models.json"
 
-OMNI_FLASH_VALID_DURATIONS = (4, 6, 8, 10)
+OMNI_FLASH_VALID_DURATIONS = OMNI_11_DURATIONS
 OMNI_FLASH_VALID_ASPECTS = {
     "VIDEO_ASPECT_RATIO_PORTRAIT",
     "VIDEO_ASPECT_RATIO_LANDSCAPE",
@@ -150,15 +152,39 @@ async def generate_omni_flash_text_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
+    model_version: str = "1.1",
+    max_credits: int = 20,
 ) -> dict:
-    """Submit Omni 1.1 Flash text-to-video on the migrated Flow batch API."""
-    _validate_duration(duration_s)
+    """Submit Omni text-to-video, keeping 1.1's existing batch behaviour.
+
+    1.2 uses a *UI-only* model marker. Its internal wire key is private and
+    must be selected by Flow's own signed-in composer, never sent as a guessed
+    batch key. The opt-in requires the Playwright UI backend.
+    """
+    if model_version not in {"1.1", "1.2"}:
+        raise ValueError("Omni model_version must be 1.1 or 1.2")
+    if model_version == "1.1":
+        _validate_duration(duration_s)
+    elif duration_s not in OMNI_12_DURATIONS or type(duration_s) is not int:
+        raise ValueError("Omni 1.2 duration must be an integer from 3 to 15 seconds")
     resolution = _validate_resolution(resolution)
     _validate_aspect(aspect_ratio)
+    if model_version == "1.2":
+        if _config.FLOW_BROWSER_BACKEND != "playwright_ui":
+            return {"status": 422, "error": "Omni 1.2 requires FLOW_BROWSER_BACKEND=playwright_ui; refusing unverified extension batch model ids"}
+        from agent.services import remote_flow_worker
+        if remote_flow_worker.connected():
+            return {"status": 422, "error": "Omni 1.2 is not yet supported by the remote Flow worker"}
+        credits = estimate_omni_12_credits(duration_s, resolution)
+        if credits > max_credits:
+            return {"status": 422, "error": f"Omni 1.2 estimated cost {credits} exceeds max_credits={max_credits}"}
     client = get_flow_client()
     try:
         pid = client._batch_project_id(project_id)
-        model_key = f"abra_t2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
+        model_key = (
+            f"omni_1_2_t2v_{duration_s}s" if model_version == "1.2"
+            else f"abra_t2v_{duration_s}s"
+        ) + ("_360p" if resolution == "360p" else "")
         freq = fb.text_video_request(
             prompt,
             pid,
@@ -184,6 +210,7 @@ async def generate_omni_flash_text_video(
             "media": [{"name": media_id}],
             "workflows": [workflow],
             "model": model_key,
+            "model_version": model_version,
             "duration_s": duration_s,
             "resolution": resolution,
             "flowkitPolling": {

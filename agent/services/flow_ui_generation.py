@@ -188,7 +188,7 @@ def _project_from_context(context: Any) -> str:
 
 
 def _duration_from_model(model: str) -> int | None:
-    m = re.search(r"_(4|6|8|10)s(?:_|$)", str(model))
+    m = re.search(r"_(\d{1,2})s(?:_|$)", str(model))
     return int(m.group(1)) if m else None
 
 
@@ -310,6 +310,8 @@ _IMAGE_MODEL_LABELS = {
 
 def _video_model_label(model: str) -> str:
     value = str(model)
+    if value.startswith("omni_1_2_"):
+        return "Omni 1.2 Flash"
     if value.startswith("abra_") or value.startswith("omni_flash_"):
         return "Omni 1.1 Flash"
     if "s_fast" in value or "fast" in value:

@@ -94,6 +94,8 @@ class GenerateOmniFlashTextVideoRequest(BaseModel):
     project_id: str = ""
     scene_id: str = ""
     duration_s: int = 8
+    model_version: Literal["1.1", "1.2"] = "1.1"
+    max_credits: int = Field(default=20,ge=0)
     resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
