@@ -55,6 +55,22 @@ OMNI_FLASH_CREDIT_COST = {4: 7, 6: 10, 8: 12, 10: 15}
 OMNI_FLASH_360P_CREDIT_COST = {4: 4, 6: 5, 8: 6, 10: 7}
 
 
+def _omni_submit_error(exc: Exception) -> dict:
+    """Preserve Google's unusual-activity block as HTTP 429, not a 502.
+
+    The shared FlowClient has already activated its durable cooldown on
+    receiving PUBLIC_ERROR_UNUSUAL_ACTIVITY; callers should not retry this
+    as an ordinary transient upstream failure.
+    """
+    message = f"{type(exc).__name__}: {exc}"
+    if "PUBLIC_ERROR_UNUSUAL_ACTIVITY" in message or "unusual activity" in message.lower():
+        return {
+            "status": 429,
+            "error": "PUBLIC_ERROR_UNUSUAL_ACTIVITY: Flow has paused video generation; check /api/flow/status for the cooldown",
+        }
+    return {"status": 502, "error": message}
+
+
 def _validate_duration(duration_s: int) -> None:
     if duration_s not in OMNI_FLASH_VALID_DURATIONS:
         raise ValueError(
@@ -190,7 +206,7 @@ async def generate_omni_flash_text_video(
             fb.RPC_GEN_VIDEO_TEXT, freq, fb.CAPTCHA_VIDEO, timeout=120)
         submitted = fb.read_text_video_submit(payload)
     except Exception as exc:
-        return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+        return _omni_submit_error(exc)
 
     media_id = submitted["media_id"]
     workflow = {
@@ -275,7 +291,7 @@ async def _submit_omni_frame_video(
         operation = fb.read_operation(payload)
         client._remember_operation(operation.operation_id, pid)
     except Exception as exc:
-        return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+        return _omni_submit_error(exc)
     return _batch_operation_result(operation, pid, batch_model, duration_s, resolution)
 
 async def generate_omni_flash_first_frame_video(
@@ -373,7 +389,7 @@ async def generate_omni_flash_video(
         operation = fb.read_operation(payload)
         client._remember_operation(operation.operation_id, pid)
     except Exception as exc:
-        return {"status": 502, "error": f"{type(exc).__name__}: {exc}"}
+        return _omni_submit_error(exc)
     batch_model = model_override or f"abra_r2v_{duration_s}s" + ("_360p" if resolution == "360p" else "")
     return _batch_operation_result(operation, pid, batch_model, duration_s, resolution)
 
