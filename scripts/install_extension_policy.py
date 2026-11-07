@@ -49,10 +49,21 @@ def main() -> int:
     if not version:
         raise SystemExit("release metadata has no version")
 
+    # Chrome installs from the forcelist URL, but subsequent updates
+    # default to the installed extension manifest's update_url.
+    # Historical FlowKit versions (including 0.3.1) have no update_url
+    # in their manifest. Force follow-up updates through the managed feed.
     policy = {
         "ExtensionInstallForcelist": [
             f"{extension_id};{args.update_url}"
-        ]
+        ],
+        "ExtensionSettings": {
+            extension_id: {
+                "installation_mode": "force_installed",
+                "update_url": args.update_url,
+                "override_update_url": True,
+            },
+        },
     }
     atomic_write(args.policy_file.resolve(), json.dumps(policy, indent=2) + "\n")
     if args.daemon_reload:
