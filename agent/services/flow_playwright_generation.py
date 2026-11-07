@@ -369,6 +369,28 @@ async def _configure(page: Any, spec: UIGenerationSpec) -> None:
     await _set_prompt(page, spec.prompt)
 
 
+async def _capture_generation_response(route: Any, generated: Any, timeout: float) -> None:
+    """Forward the original generation POST exactly once and retain its body.
+
+    Fulfill after reading bytes: a Flow navigation cannot evict an intercepted
+    response that has already been captured in Playwright's request context.
+    """
+    request = route.request
+    try:
+        upstream = await route.fetch(timeout=int(timeout * 1000))
+        body = await upstream.text()
+        await route.fulfill(response=upstream)
+        if not generated.done():
+            generated.set_result((int(upstream.status), body, request.post_data or ""))
+    except Exception as exc:
+        if not generated.done():
+            generated.set_exception(exc)
+        try:
+            await route.abort()
+        except Exception:
+            pass
+
+
 async def run_flow_playwright_generation(
     rpcid: str,
     freq: str,
@@ -404,21 +426,19 @@ async def run_flow_playwright_generation(
 
         generated: asyncio.Future[tuple[int, str, str]] = asyncio.get_running_loop().create_future()
 
-        async def on_response(response: Any) -> None:
-            if generated.done():
-                return
-            url = str(response.url or "")
-            if "batchexecute" not in url or f"rpcids={rpcid}" not in url:
-                return
-            try:
-                body = await response.text()
-                post_data = response.request.post_data or ""
-                generated.set_result((int(response.status), body, post_data))
-            except Exception as exc:
-                if not generated.done():
-                    generated.set_exception(exc)
+        # Keep the generation POST's response body before Flow navigates.
+        # A normal Playwright response event may lose it with
+        # "Network.getResponseBody: No data found" after that navigation.
+        # route.fetch forwards the intercepted request exactly once; route.fulfill
+        # returns those same response bytes to the real Flow frontend.
+        def is_generation_url(url: Any) -> bool:
+            value = str(url)
+            return "batchexecute" in value and f"rpcids={rpcid}" in value
 
-        page.on("response", on_response)
+        async def on_generation_route(route: Any) -> None:
+            await _capture_generation_response(route, generated, timeout)
+
+        await page.route(is_generation_url, on_generation_route)
         try:
             button = page.locator("button.generate-icon-button:visible").first
             await button.wait_for(state="visible", timeout=8_000)
@@ -427,7 +447,7 @@ async def run_flow_playwright_generation(
             await button.click()
             status, body, post_data = await asyncio.wait_for(generated, timeout=timeout)
         finally:
-            page.remove_listener("response", on_response)
+            await page.unroute(is_generation_url, on_generation_route)
 
         drift = compare_and_record(rpcid, freq, post_data, spec=spec)
         return {"status": status, "data": body, "payload_drift": drift}
