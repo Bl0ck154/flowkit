@@ -112,7 +112,7 @@ async def test_session_project_auto_creation_then_base64_upload(monkeypatch):
     monkeypatch.setattr(flow_api, "get_flow_client", lambda: client)
     calls = []
 
-    async def fake_ensure_session_project(received_client):
+    async def fake_ensure_session_project(received_client, *, scope='server'):
         calls.append(received_client)
         return {"project_id": SESSION_PROJECT}
 
@@ -135,7 +135,7 @@ async def test_multipart_upload_uses_request_bytes_and_session_project(monkeypat
     client = FakeFlowClient()
     monkeypatch.setattr(flow_api, "get_flow_client", lambda: client)
 
-    async def fake_ensure_session_project(received_client):
+    async def fake_ensure_session_project(received_client, *, scope='server'):
         assert received_client is client
         return {"project_id": SESSION_PROJECT}
 
@@ -184,7 +184,7 @@ async def test_multipart_route_parses_real_form_data(monkeypatch):
     client = FakeFlowClient()
     monkeypatch.setattr(flow_api, "get_flow_client", lambda: client)
 
-    async def fake_ensure_session_project(received_client):
+    async def fake_ensure_session_project(received_client, *, scope='server'):
         assert received_client is client
         return {"project_id": SESSION_PROJECT}
 
