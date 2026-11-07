@@ -10,6 +10,8 @@ const source = fs.readFileSync(
 
 const lifecycleListeners = { alarm: [], installed: [], startup: [] };
 const sockets = [];
+const intervals = new Map();
+let nextIntervalId = 1;
 let storageReads = 0;
 let tabCreates = 0;
 
@@ -85,12 +87,12 @@ const context = vm.createContext({
   URL,
   WebSocket: FakeWebSocket,
   chrome,
-  clearInterval() {},
+  clearInterval(id) { intervals.delete(id); },
   clearTimeout() {},
   console,
   fetch: async () => ({ ok: true }),
   navigator: { userAgent: 'FlowkitBootstrapTest/1.0' },
-  setInterval() { return 1; },
+  setInterval(callback, ms) { const id = nextIntervalId++; intervals.set(id, { callback, ms }); return id; },
   setTimeout() { return 1; },
 });
 
@@ -125,6 +127,16 @@ setImmediate(async () => {
     type: 'token_captured',
     flowKey: 'persisted-flow-key',
   });
+
+  const heartbeat = [...intervals.values()].find(({ ms }) => ms === 20000);
+  assert.ok(heartbeat, 'active WebSocket must have a 20s MV3 keepalive');
+  heartbeat.callback();
+  assert.equal(socket.messages[2].type, 'ping', 'heartbeat must ping local agent');
+  socket.onclose();
+  assert.ok(
+    ![...intervals.values()].some(({ ms }) => ms === 20000),
+    'socket close must release the 20s keepalive',
+  );
 
   console.log('Flowkit MV3 cold-start bootstrap regression test passed');
 });
