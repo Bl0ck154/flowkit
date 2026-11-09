@@ -19,6 +19,7 @@ from agent.services.browser_session import (
 from agent.services.image_capabilities import image_capabilities
 from agent import config as _config
 from agent.api.debug_gate import DEBUG
+from agent.services import remote_flow_worker
 from agent.services.flow_project_session import current_session_project, ensure_session_project
 from agent.services.omni_flash import (
     check_omni_flash_status,
@@ -61,6 +62,8 @@ class GenerateVideoRequest(BaseModel):
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
     resolution: Literal["360p", "720p"] = "720p"
+    # Omni only: "1.2" = Omni 1.2 Flash (3-15s; first+last only for frames).
+    omni_version: Literal["1.1", "1.2"] = "1.1"
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -86,6 +89,7 @@ class GenerateOmniFlashVideoRequest(BaseModel):
     resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    omni_version: Literal["1.1", "1.2"] = "1.1"
 
 
 class GenerateOmniFlashTextVideoRequest(BaseModel):
@@ -96,6 +100,7 @@ class GenerateOmniFlashTextVideoRequest(BaseModel):
     resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
+    omni_version: Literal["1.1", "1.2"] = "1.1"
 
 
 class UpscaleVideoRequest(BaseModel):
@@ -173,7 +178,7 @@ async def _resolve_direct_project(client, project_id: str) -> str:
     if pid:
         return pid
     try:
-        session = await ensure_session_project(client)
+        session = await ensure_session_project(client, scope=remote_flow_worker.project_scope())
     except Exception as exc:
         raise HTTPException(502, f"Could not create Flow session project: {exc}") from exc
     pid = str(session.get("project_id") or "")
@@ -212,6 +217,7 @@ async def extension_status():
             **client.generation_guard_status,
         },
         "session_project": current_session_project(),
+        "remote_worker": remote_flow_worker.status(),
     }
 
 
@@ -227,6 +233,14 @@ async def clear_hijack_cooldown():
         "cleared": True,
         "was_active": get_flow_client().clear_generation_hold(),
     }
+
+
+@router.get("/remote-worker-debug", dependencies=DEBUG)
+async def remote_worker_debug(project_id: str):
+    result = await remote_flow_worker.run_remote_ui_debug(project_id)
+    if result.get("error"):
+        raise HTTPException(_safe_status_code(result.get("status")), result["error"])
+    return result
 
 
 @router.post("/ensure-session")
@@ -319,6 +333,7 @@ async def generate_video(body: GenerateVideoRequest):
                 resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                omni_version=body.omni_version,
             )
             if body.end_image_media_id:
                 result = await generate_omni_flash_first_last_video(
@@ -331,7 +346,8 @@ async def generate_video(body: GenerateVideoRequest):
             raise HTTPException(400, str(exc)) from exc
     else:
         payload = body.model_dump(
-            exclude={"model_family", "duration_s", "resolution"}, exclude_none=True
+            exclude={"model_family", "duration_s", "resolution", "omni_version"},
+            exclude_none=True,
         )
         payload["project_id"] = project_id
         result = await client.generate_video(**payload)

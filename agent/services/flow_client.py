@@ -32,6 +32,7 @@ from agent.config import (
     FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S, FLOW_GENERATION_HOLD_PATH,
 )
 from agent import config as _config
+from agent.services import remote_flow_worker
 from agent.services import flow_batch as fb
 
 logger = logging.getLogger(__name__)
@@ -583,6 +584,19 @@ class FlowClient:
         composer. Other RPCs go through its signed-in Chrome CDP session.
         Custom StreamChat paths remain on the extension bridge.
         """
+        if remote_flow_worker.connected() and not custom_path:
+            if rpcid in {
+                fb.RPC_GEN_IMAGE, fb.RPC_GEN_VIDEO, fb.RPC_GEN_VIDEO_TEXT,
+                fb.RPC_GEN_VIDEO_FIRST_LAST, fb.RPC_GEN_VIDEO_REFERENCES,
+            }:
+                return await remote_flow_worker.run_remote_ui_generation(
+                    rpcid, freq,
+                    project_id=self._batch_active_project or FLOW_PROJECT_ID or None,
+                    timeout=timeout,
+                )
+            return await remote_flow_worker.run_remote_batch_rpc(
+                rpcid, freq, captcha_action=captcha_action, match=match, timeout=timeout,
+            )
         if _config.FLOW_BROWSER_BACKEND == "extension" or custom_path:
             return await self._send("batch_rpc", params, timeout=timeout)
 

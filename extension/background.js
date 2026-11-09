@@ -29,6 +29,7 @@ const flowUrls = [
 const FLOW_TAB_URL = 'https://flow.google.com/';
 
 let ws = null;
+let socketKeepAliveTimer = null;
 let flowKey = null;
 let callbackSecret = null;  // Auth secret for HTTP callback, received from server on WS connect
 let state = 'off'; // off | idle | running
@@ -117,7 +118,7 @@ async function initialize() {
   if (data.metrics) Object.assign(metrics, data.metrics);
   if (data.callbackSecret) callbackSecret = data.callbackSecret;
   connectToAgent();
-  chrome.alarms.create('keepAlive', { periodInMinutes: 0.4 });
+  chrome.alarms.create('keepAlive', { periodInMinutes: 0.5 });
 }
 
 // MV3 workers can be suspended and restarted without onStartup firing.
@@ -218,6 +219,7 @@ function connectToAgent() {
     console.log('[FlowAgent] Connected to agent');
     chrome.alarms.clear('reconnect');
     setState('idle');
+    startSocketKeepAlive();
 
     // Token refresh alarm — 45 min gives buffer before ~60 min expiry
     chrome.alarms.create('token-refresh', { periodInMinutes: 45 });
@@ -462,6 +464,7 @@ function connectToAgent() {
   };
 
   ws.onclose = () => {
+    stopSocketKeepAlive();
     setState('off');
     chrome.alarms.clear('token-refresh');
     if (!manualDisconnect) scheduleReconnect();
@@ -476,6 +479,31 @@ function connectToAgent() {
 
 function scheduleReconnect() {
   chrome.alarms.create('reconnect', { delayInMinutes: 0.083 }); // ~5s
+}
+
+function stopSocketKeepAlive() {
+  if (socketKeepAliveTimer !== null) {
+    clearInterval(socketKeepAliveTimer);
+    socketKeepAliveTimer = null;
+  }
+}
+
+function startSocketKeepAlive() {
+  stopSocketKeepAlive();
+  // Chrome MV3 workers stop after 30s without events. chrome.alarms has
+  // a minimum 30s period, so alarms alone cannot keep the WebSocket alive.
+  // A 20s WS ping resets the service worker idle timer (Chrome >= 116).
+  socketKeepAliveTimer = setInterval(() => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      } catch (err) {
+        console.warn('[FlowAgent] WS heartbeat error:', String(err));
+      }
+    } else {
+      stopSocketKeepAlive();
+    }
+  }, 20_000);
 }
 
 function keepAlive() {
@@ -664,7 +692,15 @@ const MAX_RPC_TEXT = 32000000; // the project listing alone is past 17 MB
 
 async function runBatchRpc(cmd) {
   const tabs = await chrome.tabs.query({ url: flowUrls });
+  // With several Flow tabs open (possibly on different Google accounts), use
+  // the one whose project id appears in this request.
+  const freqText = String(cmd.freq || '');
+  const projectTab = tabs.find((t) => {
+    const m = t.url && t.url.match(/\/project\/([0-9a-f-]{36})/i);
+    return m && freqText.includes(m[1]) && !t.discarded;
+  });
   let candidate =
+    projectTab ||
     tabs.find((t) => t.url && t.url.includes('/project/') && !t.discarded) ||
     tabs.find((t) => t.active && !t.discarded) ||
     tabs.find((t) => !t.discarded) ||
@@ -710,9 +746,12 @@ async function runBatchRpc(cmd) {
       // image generation when source-path is missing even though Lite may not.
       const sourcePath = location.pathname || '/';
       const hl = (document.documentElement.lang || navigator.language || 'en').split('-')[0];
+      // Multi-account: a tab on /u/<n>/ must hit /u/<n>/_/..., otherwise the
+      // cookie jar resolves to the default account and its projects 404.
+      const acct = (location.pathname.match(/^\/u\/\d+(?=\/)/) || [''])[0];
       const url = customPath
-        ? `${customPath}?bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`
-        : `/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
+        ? `${customPath.startsWith('/_/') ? acct : ''}${customPath}?bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`
+        : `${acct}/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=${encodeURIComponent(rpcid)}` +
           `&source-path=${encodeURIComponent(sourcePath)}` +
           `&bl=${encodeURIComponent(bl || '')}&f.sid=${encodeURIComponent(sid || '')}` +
           `&hl=${encodeURIComponent(hl)}&_reqid=${reqid}&rt=c`;
