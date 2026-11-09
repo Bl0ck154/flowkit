@@ -1,5 +1,8 @@
 """Flow Kit — FastAPI + WebSocket server entry point."""
 import asyncio
+import hmac
+import os
+from pathlib import Path
 import json
 import logging
 import re
@@ -12,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, FLOWKIT_ALLOWED_HOSTS
+from agent.config import API_HOST, API_PORT, WS_HOST, WS_PORT, FLOWKIT_ALLOWED_HOSTS, BASE_DIR
 from agent.api.debug_gate import DEBUG as _DEBUG
 from agent.db.schema import init_db, close_db
 from agent.api.characters import router as characters_router
@@ -32,12 +35,18 @@ from agent.api.provider_jobs import router as provider_jobs_router
 from agent.api.active_project import router as active_project_router
 from agent.worker.processor import get_worker_controller
 from agent.services.flow_client import get_flow_client
+from agent.services import remote_flow_worker
 from agent.services.event_bus import event_bus
 from agent.sdk import init_sdk
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
+REMOTE_WORKER_HOST = os.environ.get("FLOW_REMOTE_WORKER_HOST", "127.0.0.1")
+REMOTE_WORKER_PORT = int(os.environ.get("FLOW_REMOTE_WORKER_PORT", "9226"))
+REMOTE_WORKER_PAIR_CODE = os.environ.get("FLOW_REMOTE_WORKER_PAIR_CODE", "")
+REMOTE_WORKER_SESSION_TOKEN_FILE = Path(BASE_DIR) / "remote_worker_session_token"
 
 # ─── WebSocket Server for Extension ─────────────────────────
 
@@ -76,6 +85,105 @@ async def run_ws_server():
         await asyncio.Future()  # run forever
 
 
+def _read_remote_worker_session_token() -> str:
+    try:
+        return REMOTE_WORKER_SESSION_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_remote_worker_session_token(token: str) -> None:
+    REMOTE_WORKER_SESSION_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REMOTE_WORKER_SESSION_TOKEN_FILE.write_text(token, encoding="utf-8")
+    REMOTE_WORKER_SESSION_TOKEN_FILE.chmod(0o600)
+
+
+async def remote_worker_ws_handler(websocket):
+    """Authenticated browser worker used only for real Flow UI generation."""
+    session_token = _read_remote_worker_session_token()
+    if not session_token and not REMOTE_WORKER_PAIR_CODE:
+        await websocket.close(code=1011, reason="Remote worker disabled")
+        return
+
+    try:
+        raw = await asyncio.wait_for(websocket.recv(), timeout=5)
+        hello = json.loads(raw)
+    except (asyncio.TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
+        await websocket.close(code=4003, reason="Worker auth required")
+        return
+
+    if not isinstance(hello, dict):
+        await websocket.close(code=4003, reason="Unauthorized worker")
+        return
+
+    paired_token: str | None = None
+    if hello.get("type") == "worker_auth" and session_token:
+        supplied = str(hello.get("token") or "")
+        authorized = hmac.compare_digest(supplied, session_token)
+    elif hello.get("type") == "worker_pair" and not session_token and REMOTE_WORKER_PAIR_CODE:
+        supplied = str(hello.get("code") or "")
+        authorized = hmac.compare_digest(supplied, REMOTE_WORKER_PAIR_CODE)
+        if authorized:
+            paired_token = secrets.token_urlsafe(48)
+            _write_remote_worker_session_token(paired_token)
+    else:
+        authorized = False
+
+    if not authorized:
+        logger.warning(
+            "Remote Flow worker auth rejected type=%s session_token_present=%s pair_code_present=%s",
+            hello.get("type"),
+            bool(session_token),
+            bool(REMOTE_WORKER_PAIR_CODE),
+        )
+        await websocket.close(code=4003, reason="Unauthorized worker")
+        return
+
+    await remote_flow_worker.set_worker(websocket)
+    if paired_token:
+        await websocket.send(json.dumps({"type": "worker_paired", "token": paired_token}))
+    else:
+        await websocket.send(json.dumps({"type": "worker_auth_ok"}))
+    try:
+        async for raw in websocket:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    await remote_flow_worker.handle_message(data, websocket)
+            except json.JSONDecodeError:
+                logger.warning("Invalid JSON from remote Flow worker")
+            except Exception as exc:
+                logger.exception("Remote Flow worker message failed: %s", exc)
+    except websockets.ConnectionClosed:
+        pass
+    finally:
+        remote_flow_worker.clear_worker(websocket)
+
+
+async def run_remote_worker_ws_server():
+    try:
+        token_value = _read_remote_worker_session_token()
+        logger.info(
+            "Remote worker token state path=%s exists=%s token_len=%d",
+            REMOTE_WORKER_SESSION_TOKEN_FILE,
+            REMOTE_WORKER_SESSION_TOKEN_FILE.exists(),
+            len(token_value),
+        )
+    except Exception as exc:
+        logger.warning("Remote worker token state inspect failed: %s", exc)
+    if not REMOTE_WORKER_PAIR_CODE and not _read_remote_worker_session_token():
+        logger.info("Remote Flow UI worker disabled (no pair code or session token)")
+        await asyncio.Future()
+    async with websockets.serve(remote_worker_ws_handler, REMOTE_WORKER_HOST, REMOTE_WORKER_PORT, origins=[None, re.compile(r"chrome-extension://[a-p]{32}")]):
+        logger.info(
+            "Remote Flow UI worker listening on ws://%s:%d",
+            REMOTE_WORKER_HOST,
+            REMOTE_WORKER_PORT,
+        )
+        await asyncio.Future()
+
+
+
 # ─── FastAPI App ─────────────────────────────────────────────
 
 @asynccontextmanager
@@ -109,14 +217,16 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks
     ws_task = asyncio.create_task(run_ws_server())
+    remote_worker_task = asyncio.create_task(run_remote_worker_ws_server())
     worker_task = asyncio.create_task(controller.start())
-    logger.info("WS server + worker started")
+    logger.info("WS servers + worker started")
 
     yield
 
     controller.request_shutdown()
     await controller.drain()
     ws_task.cancel()
+    remote_worker_task.cancel()
     worker_task.cancel()
     await close_db()
     logger.info("Flow Kit stopped")

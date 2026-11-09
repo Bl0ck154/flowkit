@@ -21,7 +21,7 @@ FLOWKIT_ALLOWED_HOSTS = [
 
 # ─── WebSocket Server (extension connects here) ─────────────
 WS_HOST = os.environ.get("WS_HOST", "127.0.0.1")
-WS_PORT = int(os.environ.get("WS_PORT", "9222"))
+WS_PORT = int(os.environ.get("WS_PORT", "9223"))
 
 
 # ─── Flow batchexecute ──────────────────────────────────────

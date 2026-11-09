@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from agent.services.flow_payload_drift import compare_and_record
+from agent.services.omni_model_versions import (
+    is_omni_12_label, matches_model_label, estimate_omni_12_credits,
+)
 from agent.services.flow_ui_generation import (
     UIGenerationSpec,
     _IMAGE_MODEL_LABELS,
@@ -86,10 +89,21 @@ async def _dismiss_overlays(page: Any) -> None:
 async def _open_settings(page: Any) -> Any:
     settings = page.locator("button.settings-trigger-button").first
     await settings.wait_for(state="visible", timeout=10_000)
-    radios = page.locator('button[role="radio"]:visible')
-    if await radios.count() == 0:
+
+    # Do not treat an arbitrary visible role=radio elsewhere on the page as
+    # proof that the generation settings panel is open. New Flow cohorts can
+    # expose unrelated radio controls in the project UI. The panel is open
+    # only when one of its mode toggles (Image / Video) is visible.
+    image_mode = page.locator('button[role="radio"]:visible').filter(
+        has=page.locator("mat-icon", has_text="image")
+    ).first
+    video_mode = page.locator('button[role="radio"]:visible').filter(
+        has=page.locator("mat-icon", has_text="videocam")
+    ).first
+    if not await image_mode.count() and not await video_mode.count():
         await settings.click()
         await page.wait_for_timeout(400)
+        await image_mode.wait_for(state="visible", timeout=8_000)
     return settings
 
 
@@ -131,18 +145,73 @@ async def _select_model(page: Any, label: str) -> None:
         text = (await item.inner_text()).strip()
         if any(name in text for name in ("Nano Banana", "Omni", "Veo")):
             trigger = item
-            if label in text:
+            if matches_model_label(text, label):
                 return
             break
     if trigger is None:
         raise RuntimeError("Flow UI model selector not found")
     await trigger.click()
     await page.wait_for_timeout(300)
-    option = page.locator('[role="menuitem"]:visible').filter(has_text=label).first
-    if not await option.count():
+    options = page.locator('[role="menuitem"]:visible')
+    chosen = None
+    for i in range(await options.count()):
+        item = options.nth(i)
+        if matches_model_label((await item.inner_text()).strip(), label):
+            chosen = item
+            break
+    if chosen is None:
         raise RuntimeError(f"Flow UI model option not found: {label}")
-    await option.click()
+    await chosen.click()
     await page.wait_for_timeout(300)
+
+
+async def _select_omni_12_duration(page: Any, seconds: int) -> None:
+    """Omni 1.2 uses a 3–15 second slider, indexed 0–12."""
+    if type(seconds) is not int or not 3 <= seconds <= 15:
+        raise ValueError("Omni 1.2 duration must be 3–15 whole seconds")
+    slider = page.locator('input[type="range"][min="0"][max="12"]:visible').first
+    await slider.wait_for(state="visible", timeout=8_000)
+    box = await slider.bounding_box()
+    if not box:
+        raise RuntimeError("Flow's Omni 1.2 duration slider is not attached")
+    # A pointer + keyboard sequence triggers Angular's normal update path.
+    await slider.click(position={"x": min(7, box["width"] / 2), "y": box["height"] / 2})
+    for _ in range(seconds - 3):
+        await slider.press("ArrowRight")
+    selected = int(await slider.input_value())
+    if selected != seconds - 3:
+        raise RuntimeError(f"Omni 1.2 duration not selected: {seconds}s (index={selected})")
+
+
+def _validate_omni_12_credits(visible_text: str, *, duration: int, resolution: str, cap: int) -> int:
+    """Fail closed before generation if the UI price is unknown or over budget."""
+    import re
+    estimate = estimate_omni_12_credits(duration, resolution)
+    if cap < 0 or estimate > cap:
+        raise RuntimeError(f"Omni 1.2 generation requires {estimate} credits; limit is {cap}")
+    tail = visible_text[-1500:]
+    quote = (
+        re.search(r"кредитів:\s*(\d+)", tail, re.I)
+        or re.search(r"(\d+)\s+credits", tail, re.I)
+        or re.search(r"credits?:\s*(\d+)", tail, re.I)
+    )
+    if quote is None:
+        raise RuntimeError("Flow's live Omni 1.2 credit quote is unavailable; aborting")
+    live = int(quote.group(1))
+    if live > estimate or live > cap:
+        raise RuntimeError(f"Flow wants {live} credits, over configured limit {cap} or estimate {estimate}")
+    return live
+
+
+async def _check_omni_12_quote(page: Any, duration: int, resolution: str) -> None:
+    """Check the current actual UI quote before touching Generate."""
+    cap = int(os.environ.get("FLOW_OMNI12_MAX_CREDITS", "20"))
+    # Angular updates this quote asynchronously after changing the slider.
+    await page.wait_for_timeout(350)
+    body = await page.locator("body").inner_text()
+    _validate_omni_12_credits(
+        body, duration=duration, resolution=resolution, cap=cap
+    )
 
 
 async def _clear_selected_media(page: Any) -> None:
@@ -338,7 +407,11 @@ async def _configure(page: Any, spec: UIGenerationSpec) -> None:
         if spec.resolution:
             await _click_radio_text(page, spec.resolution)
         if spec.duration_s:
-            await _click_radio_text(page, str(spec.duration_s))
+            if is_omni_12_label(_video_model_label(spec.model)):
+                await _select_omni_12_duration(page, spec.duration_s)
+                await _check_omni_12_quote(page, spec.duration_s, spec.resolution or "720p")
+            else:
+                await _click_radio_text(page, str(spec.duration_s))
         await _click_radio_text(page, "x1")
         await settings.click()
         await page.wait_for_timeout(300)
@@ -356,6 +429,28 @@ async def _configure(page: Any, spec: UIGenerationSpec) -> None:
                 await _attach_ingredient(page, spec, media_id)
             await _close_ingredient_picker(page)
     await _set_prompt(page, spec.prompt)
+
+
+async def _capture_generation_response(route: Any, generated: Any, timeout: float) -> None:
+    """Forward the original generation POST exactly once and retain its body.
+
+    Fulfill after reading bytes: a Flow navigation cannot evict an intercepted
+    response that has already been captured in Playwright's request context.
+    """
+    request = route.request
+    try:
+        upstream = await route.fetch(timeout=int(timeout * 1000))
+        body = await upstream.text()
+        await route.fulfill(response=upstream)
+        if not generated.done():
+            generated.set_result((int(upstream.status), body, request.post_data or ""))
+    except Exception as exc:
+        if not generated.done():
+            generated.set_exception(exc)
+        try:
+            await route.abort()
+        except Exception:
+            pass
 
 
 async def run_flow_playwright_generation(
@@ -393,21 +488,19 @@ async def run_flow_playwright_generation(
 
         generated: asyncio.Future[tuple[int, str, str]] = asyncio.get_running_loop().create_future()
 
-        async def on_response(response: Any) -> None:
-            if generated.done():
-                return
-            url = str(response.url or "")
-            if "batchexecute" not in url or f"rpcids={rpcid}" not in url:
-                return
-            try:
-                body = await response.text()
-                post_data = response.request.post_data or ""
-                generated.set_result((int(response.status), body, post_data))
-            except Exception as exc:
-                if not generated.done():
-                    generated.set_exception(exc)
+        # Keep the generation POST's response body before Flow navigates.
+        # A normal Playwright response event may lose it with
+        # "Network.getResponseBody: No data found" after that navigation.
+        # route.fetch forwards the intercepted request exactly once; route.fulfill
+        # returns those same response bytes to the real Flow frontend.
+        def is_generation_url(url: Any) -> bool:
+            value = str(url)
+            return "batchexecute" in value and f"rpcids={rpcid}" in value
 
-        page.on("response", on_response)
+        async def on_generation_route(route: Any) -> None:
+            await _capture_generation_response(route, generated, timeout)
+
+        await page.route(is_generation_url, on_generation_route)
         try:
             button = page.locator("button.generate-icon-button:visible").first
             await button.wait_for(state="visible", timeout=8_000)
@@ -416,7 +509,7 @@ async def run_flow_playwright_generation(
             await button.click()
             status, body, post_data = await asyncio.wait_for(generated, timeout=timeout)
         finally:
-            page.remove_listener("response", on_response)
+            await page.unroute(is_generation_url, on_generation_route)
 
         drift = compare_and_record(rpcid, freq, post_data, spec=spec)
         return {"status": status, "data": body, "payload_drift": drift}

@@ -50,6 +50,7 @@ def current_session_project() -> dict:
     return {
         "project_id": pid if _UUID_RE.fullmatch(pid) else None,
         "title": state.get("title"),
+        "scope": str(state.get("scope") or "server"),
         "last_activity_at": last or None,
         "idle_age_s": round(age, 3) if age is not None else None,
         "idle_limit_s": FLOW_SESSION_PROJECT_IDLE_S,
@@ -65,10 +66,11 @@ def touch_session_project(project_id: str) -> None:
     _write_state(state)
 
 
-async def ensure_session_project(client, *, title: str | None = None, force_new: bool = False) -> dict:
+async def ensure_session_project(client, *, title: str | None = None, force_new: bool = False, scope: str = "server") -> dict:
+    scope = str(scope or "server")
     async with _lock:
         state = current_session_project()
-        if not force_new and state.get("active") and state.get("project_id"):
+        if not force_new and state.get("active") and state.get("project_id") and state.get("scope") == scope:
             touch_session_project(state["project_id"])
             return current_session_project()
 
@@ -84,6 +86,7 @@ async def ensure_session_project(client, *, title: str | None = None, force_new:
         state = {
             "project_id": pid,
             "title": str(data.get("title") or title),
+            "scope": scope,
             "created_at": time.time(),
             "last_activity_at": time.time(),
         }

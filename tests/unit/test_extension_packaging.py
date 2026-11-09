@@ -39,9 +39,17 @@ def test_policy_writer_is_readable_by_unprivileged_chrome(tmp_path, monkeypatch)
 
     assert policy.main() == 0
     data = json.loads(target.read_text(encoding="utf-8"))
+    update_url = "http://127.0.0.1:8110/updates.xml"
     assert data == {
         "ExtensionInstallForcelist": [
-            f"{EXPECTED_EXTENSION_ID};http://127.0.0.1:8110/updates.xml"
-        ]
+            f"{EXPECTED_EXTENSION_ID};{update_url}"
+        ],
+        "ExtensionSettings": {
+            EXPECTED_EXTENSION_ID: {
+                "installation_mode": "force_installed",
+                "update_url": update_url,
+                "override_update_url": True,
+            },
+        },
     }
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
