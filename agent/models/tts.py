@@ -9,6 +9,11 @@ class TTSGenerateRequest(BaseModel):
     ref_audio: Optional[str] = Field(None, max_length=500)
     ref_text: Optional[str] = None
     speed: float = Field(1.0, ge=0.5, le=3.0)
+    provider: Optional[str] = Field(
+        None,
+        description="'local' (default) or a media provider name — "
+                    "a provider job (kind=audio) is queued for an external worker",
+    )
 
 
 class TTSGenerateResponse(BaseModel):

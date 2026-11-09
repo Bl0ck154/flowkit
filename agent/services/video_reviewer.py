@@ -1,4 +1,4 @@
-"""Video review engine — frame extraction + Claude Vision analysis.
+"""Video review engine — frame extraction + AI vision analysis.
 
 Two analysis backends:
   1. CLI subprocess (claude/agy/codex, default) — no API key needed, uses contact sheets
@@ -13,7 +13,9 @@ import os
 import re
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 import ssl
 
@@ -37,6 +39,7 @@ from agent.services.cli_providers import (  # noqa: F401  (PROVIDER_BINARIES re-
     PROVIDER_BINARIES,
     resolve_role,
 )
+from agent.utils.paths import file_url_to_path
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +143,25 @@ async def _download_video(url: str, dest: Path) -> None:
                     f.write(chunk)
 
 
+def _local_media_path(url: str) -> Path | None:
+    """Return the local file for file:// URLs or plain paths, else None.
+
+    Provider-neutral: clips produced by the assistant provider (or any local
+    backend) are already on disk — no download needed.
+    """
+    if not url:
+        return None
+    p = file_url_to_path(url)
+    if p is not None:
+        return p if p.is_file() else None
+    parsed = urlparse(url)
+    # A Windows drive letter ("C:") parses as a scheme; it is still a path.
+    if not parsed.scheme or len(parsed.scheme) == 1:
+        p = Path(url)
+        return p if p.is_file() else None
+    return None
+
+
 async def _download_via_get_media(media_id: str, dest: Path) -> None:
     """Re-fetch a clip through the media record when its stored url has expired.
 
@@ -177,10 +199,23 @@ async def _download_via_get_media(media_id: str, dest: Path) -> None:
     logger.info("Downloaded %s via get_media (%d bytes)", media_id[:12], len(video_bytes))
 
 
+def _ffmpeg_bin() -> str:
+    env_bin = os.environ.get("FFMPEG_BIN")
+    if env_bin:
+        return env_bin
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def _extract_frames(video_path: str, fps: float, out_dir: str) -> list:
     """Extract frames as JPEGs using ffmpeg. Returns sorted list of frame paths."""
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        _ffmpeg_bin(), "-y", "-i", video_path,
         "-vf", f"fps={fps},scale=640:-1",
         "-q:v", "4",
         f"{out_dir}/frame_%04d.jpg",
@@ -206,7 +241,7 @@ def _has_drawtext() -> bool:
     """
     try:
         out = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-filters"],
+            [_ffmpeg_bin(), "-hide_banner", "-filters"],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -254,7 +289,7 @@ def _create_contact_sheets(
     def _extract(with_drawtext: bool):
         return subprocess.run(
             [
-                "ffmpeg", "-y", "-i", video_path,
+                _ffmpeg_bin(), "-y", "-i", video_path,
                 "-vf", _frame_filter(fps, with_drawtext),
                 "-q:v", "2",
                 f"{frames_dir}/frame_%04d.jpg",
@@ -293,7 +328,11 @@ def _create_contact_sheets(
         chunk_dir = Path(out_dir) / f"_chunk_{sheet_idx:02d}"
         chunk_dir.mkdir(exist_ok=True)
         for i, frame_path in enumerate(chunk, start=1):
-            os.symlink(frame_path.resolve(), chunk_dir / f"f_{i:04d}.jpg")
+            target_link = chunk_dir / f"f_{i:04d}.jpg"
+            try:
+                os.symlink(frame_path.resolve(), target_link)
+            except OSError:
+                shutil.copy2(frame_path.resolve(), target_link)
         output = Path(out_dir) / f"sheet_{sheet_idx:02d}.jpg"
         # Pick the largest divisor of the chunk size (up to REVIEW_SHEET_COLS) as the
         # column count, so every cell in the tile is filled — zero unfilled cells for any
@@ -303,7 +342,7 @@ def _create_contact_sheets(
         cols_eff = max(c for c in range(1, REVIEW_SHEET_COLS + 1) if len(chunk) % c == 0)
         rows_eff = len(chunk) // cols_eff
         tile_cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg_bin(), "-y",
             "-i", f"{chunk_dir}/f_%04d.jpg",
             "-vf", f"tile={cols_eff}x{rows_eff}:nb_frames={len(chunk)}",
             "-q:v", "2", str(output),
@@ -623,7 +662,7 @@ async def _run_codex_cli(
             args += ["-c", f'model_reasoning_effort="{effort}"']
         args.append(prompt)
         await _spawn_and_check(tuple(args), "codex")
-        answer = out_path.read_text().strip()
+        answer = out_path.read_text(encoding="utf-8").strip()
         if not answer:
             raise RuntimeError(
                 "codex CLI exited cleanly but wrote no answer to its output file"
@@ -645,7 +684,19 @@ async def _analyze_cli(
 
     `role` is passed in by a multi-scene review so every scene runs on the same
     backend — see `review_video`.
+
+    The `muse` reviewer (the agent itself) has no CLI to shell out to:
+    pointing the role at it and calling this endpoint is a configuration
+    mistake, not a review — build sheets via `review-sheets` and submit scores
+    via `review-submit` instead (see `/fk-review-video`).
     """
+    if (role or {}).get("provider") == "muse":
+        raise RuntimeError(
+            "video_review role is 'muse' (the agent itself): the server "
+            "cannot invoke it. Use POST /api/videos/<VID>/review-sheets to "
+            "build contact sheets, score them by hand, then POST "
+            "/api/videos/<VID>/review-submit."
+        )
     if timestamped is None:
         timestamped = _has_drawtext()
     n_sheets = len(contact_sheets)
@@ -743,6 +794,41 @@ async def _analyze_sdk(
 
 # ─── Public API ───────────────────────────────────────────────
 
+async def _fetch_scene_video(
+    scene: dict, orient_prefix: str, tmp_path: Path,
+):
+    """Resolve a scene's clip to a local path (download if remote).
+
+    Provider-neutral: file:// URLs and local paths are used directly;
+    http(s) URLs are downloaded, with the Flow get_media RPC as a fallback
+    when the extension is connected.
+    """
+    video_url = scene.get(f"{orient_prefix}_video_url")
+    if not video_url:
+        raise ValueError(f"No video URL found for scene {scene['id']}")
+
+    local = _local_media_path(video_url)
+    if local:
+        logger.info("Reviewing local video for scene %s: %s", scene["id"], local)
+        return local
+    video_path = tmp_path / "scene.mp4"
+    logger.info("Downloading video for scene %s from %s", scene["id"], video_url[:80])
+    try:
+        await _download_video(video_url, video_path)
+    except (_URLExpiredError, Exception) as e:
+        # URL expired or download failed — fall back to get_media API.
+        # That is a Flow-only mechanism; skip it for other providers.
+        media_id = scene.get(f"{orient_prefix}_video_media_id")
+        from agent.services.flow_client import get_flow_client
+        if not media_id or not get_flow_client().connected:
+            raise ValueError(
+                f"Cannot fetch video for scene {scene['id']}: {e}")
+        logger.info("URL download failed for scene %s (%s), fetching via get_media %s",
+                    scene["id"], type(e).__name__, media_id[:12])
+        await _download_via_get_media(media_id, video_path)
+    return video_path
+
+
 async def review_scene_video(
     scene: dict,
     characters: list,
@@ -751,34 +837,17 @@ async def review_scene_video(
     project_id: str = None,
     role: dict | None = None,
 ) -> SceneReview:
-    """Review a single scene's video via frame extraction + Claude Vision.
+    """Review a single scene's video via frame extraction + AI vision.
 
     `role` pins the provider/model/effort. `review_video` resolves it once and
     passes it down; a single-scene call resolves it here.
     """
     fps = REVIEW_FPS_DEEP if mode == "deep" else REVIEW_FPS_LIGHT
-
     orient_prefix = "vertical" if orientation.upper() == "VERTICAL" else "horizontal"
-    video_url = scene.get(f"{orient_prefix}_video_url")
-
-    if not video_url:
-        raise ValueError(f"No video URL found for scene {scene['id']} ({orientation})")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        video_path = tmp_path / "scene.mp4"
-
-        logger.info("Downloading video for scene %s from %s", scene["id"], video_url[:80])
-        try:
-            await _download_video(video_url, video_path)
-        except (_URLExpiredError, Exception) as e:
-            # URL expired or download failed — fall back to get_media API
-            media_id = scene.get(f"{orient_prefix}_video_media_id")
-            if not media_id:
-                raise ValueError(f"No media_id to refresh URL for scene {scene['id']}")
-            logger.info("URL download failed for scene %s (%s), fetching via get_media %s",
-                        scene["id"], type(e).__name__, media_id[:12])
-            await _download_via_get_media(media_id, video_path)
+        video_path = await _fetch_scene_video(scene, orient_prefix, tmp_path)
 
         if ANTHROPIC_API_KEY:
             # SDK path: individual frames
@@ -808,6 +877,64 @@ async def review_scene_video(
                 timestamped=timestamped, role=role,
             )
 
+    return score_review_answer(scene["id"], result, n_frames, fps)
+
+
+async def prepare_review_sheets(
+    scene: dict,
+    characters: list,
+    mode: str,
+    orientation: str,
+    persist_dir: Path,
+) -> dict:
+    """Build contact sheets for a scene WITHOUT calling any reviewer.
+
+    Sheets are written under ``persist_dir`` (survives the call) so the
+    agent itself — Muse, Codex, or agy — can read them later and score by
+    hand. Returns sheet paths, frame metadata, and the rubric prompt the
+    reviewer should answer.
+
+    Raises ValueError when the scene has no fetchable video.
+    """
+    fps = REVIEW_FPS_DEEP if mode == "deep" else REVIEW_FPS_LIGHT
+    orient_prefix = "vertical" if orientation.upper() == "VERTICAL" else "horizontal"
+
+    scene_dir = Path(persist_dir) / scene["id"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        video_path = await _fetch_scene_video(scene, orient_prefix, tmp_path)
+        # Do not create output directories for a scene with no source video.
+        scene_dir.mkdir(parents=True, exist_ok=True)
+        contact_sheets, n_frames, timestamped = await asyncio.get_event_loop().run_in_executor(
+            None, _create_contact_sheets, str(video_path), fps, str(scene_dir)
+        )
+    if not contact_sheets or not all(s.exists() for s in contact_sheets):
+        raise RuntimeError(f"Contact sheets not created for scene {scene['id']}")
+    prompt = _build_prompt(n_frames, fps, len(contact_sheets), scene)
+    return {
+        "scene_id": scene["id"],
+        "sheets": [str(s) for s in contact_sheets],
+        "n_frames": n_frames,
+        "fps": fps,
+        "timestamped": timestamped,
+        "prompt": prompt,
+        "scene_prompt": scene.get("prompt") or "",
+        "video_prompt": scene.get("video_prompt") or "",
+        "character_names": _parse_character_names(scene) or [c.get("name") for c in (characters or []) if c.get("name")],
+    }
+
+
+def score_review_answer(
+    scene_id: str, result: dict, n_frames: int, fps: float,
+) -> SceneReview:
+    """Turn a raw reviewer answer (dimensions/errors/usable_segments) into a SceneReview.
+
+    Shared by every reviewer backend — CLI, SDK, or the agent itself
+    scoring contact sheets by hand. Applies the same repairs, severity rules,
+    CRITICAL caps, and overall computation.
+    """
+    errors = []
     # Parse structured errors with severity.
     #
     # The three fields are NOT equal, so they are not treated equally. Only
@@ -912,11 +1039,11 @@ async def review_scene_video(
         logger.warning(
             "Scene %s: review answer needed repair — %d error field(s) defaulted, "
             "%d usable segment(s) unreadable",
-            scene["id"], repaired_fields, dropped_segments,
+            scene_id, repaired_fields, dropped_segments,
         )
 
     return SceneReview(
-        scene_id=scene["id"],
+        scene_id=scene_id,
         overall_score=overall,
         verdict=_verdict(overall),
         dimensions=dims,

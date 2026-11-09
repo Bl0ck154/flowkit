@@ -1,13 +1,14 @@
 /**
- * Content script — bridge between background.js and injected.js
- * Injects injected.js into MAIN world to access window.grecaptcha
+ * Content script — bridge between background.js (ISOLATED world) and
+ * injected.js (MAIN world).
+ *
+ * All MAIN world scripts (hijack_bypass.js, recaptcha_enterprise.js,
+ * recaptcha__en.js, injected.js) are now loaded via manifest.json
+ * content_scripts with "world": "MAIN" — this bypasses the page's
+ * Trusted Types CSP entirely. No more createElement('script') needed.
+ *
+ * This content script only handles the message relay between the two worlds.
  */
-(function () {
-  const s = document.createElement('script');
-  s.src = chrome.runtime.getURL('injected.js');
-  s.onload = () => s.remove();
-  (document.head || document.documentElement).appendChild(s);
-})();
 
 chrome.runtime.onMessage.addListener((msg, _, reply) => {
   if (msg.type !== 'GET_CAPTCHA') return;

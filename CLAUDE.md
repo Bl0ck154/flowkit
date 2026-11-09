@@ -30,11 +30,13 @@ that change how you work:
 
 - **Projects are not created by Flow Kit any more.** Make one in the Flow UI and
   pin its uuid as `FLOW_PROJECT_ID`, or pass `flow_project_id` to `POST /api/projects`.
-- **Four capabilities are unported** because their payloads were never captured:
-  4K upscale, r2v, start+end-frame chaining, and Omni Flash. They fail with
+- **Three capabilities are unported**, all on the Veo path, because their
+  payloads were never captured: **video** upscale (not image export, which
+  works), Veo r2v, and Veo start+end-frame chaining. They fail with
   `UNSUPPORTED_ON_BATCH_API` rather than silently producing the wrong thing.
-  `FLOW_ALLOW_DEGRADED=1` drops chaining and r2v to plain i2v; upscale has no
-  fallback. To restore one properly, see `docs/CAPTURE.md`.
+  Omni covers frame, first+last and reference modes — use
+  `model_family=omni_flash`. `FLOW_ALLOW_DEGRADED=1` drops Veo chaining and r2v
+  to plain i2v; video upscale has no fallback. See `docs/CAPTURE.md`.
 - **A poll saying "Media not found." is not a failure.** Finished jobs report it.
 
 ## Skills

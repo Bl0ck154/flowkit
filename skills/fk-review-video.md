@@ -1,27 +1,37 @@
-Review AI-generated scene videos for quality using Claude Vision.
+Review AI-generated scene videos for quality.
 
-Usage: `/fk-review-video <video_id> [--mode light|deep]`
+Usage: `/fk-review-video <video_id> [--mode light|deep] [--by cli|muse]`
 
-Default mode: `light`. Orientation auto-detected from project `meta.json`.
+Default mode: `light`. Default reviewer: `cli` (whatever the `video_review`
+role points at in `agent/providers.json`).
+
+## Reviewer backends
+
+- **`cli`** (default): `POST /api/videos/<VID>/review` shells out to the
+  configured `video_review` role provider. Needs the CLI binary on PATH.
+- **`muse`** (official provider): the server builds contact sheets
+  (`POST /api/videos/<VID>/review-sheets`), Muse reads them with vision and
+  scores each scene, then submits (`POST /api/videos/<VID>/review-submit`).
+  Works everywhere — no CLI, no API key. Select it with
+  `/fk-change-provider set muse`.
 
 ## Prerequisites
 
-- `ANTHROPIC_API_KEY` env var set
 - `ffmpeg` + `ffprobe` installed
 - Scenes must have completed videos (`${ori}_video_status = COMPLETED`)
+- (`cli` only) the review CLI installed; (`muse`) nothing extra
 
 ## Step 1: Pre-check
 
 ```bash
-# Verify server + extension connected
+# Verify server is up (extension NOT required for review)
 curl -s http://127.0.0.1:8100/health
-# Must return: {"extension_connected": true}
 
 # Verify video exists
 curl -s http://127.0.0.1:8100/api/videos/<VID>
 ```
 
-**ABORT** if extension not connected or video not found.
+**ABORT** if the server is down or the video is not found.
 
 ## Step 2: Check scenes have completed videos
 
@@ -33,7 +43,51 @@ For each scene, verify `${ori}_video_status = COMPLETED` (orientation auto-detec
 
 **ABORT** if any scene is missing a completed video — tell user to run `/fk-gen-videos` first.
 
-## Step 3: Run review via API
+## Step 3a: Self review (`--by muse`)
+
+You — the agent running this skill (Muse, Codex, or agy) — score the sheets
+by hand with your own vision. The provider key is `muse` for historical
+reasons; it means "me, the agent". Build the contact sheets — no AI CLI
+involved:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-sheets" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "<PID>", "mode": "light"}' | python3 -m json.tool
+# → {sheets: [{scene_id, sheets: ["/abs/path/sheet_1.jpg", ...],
+#               n_frames, fps, prompt (rubric), scene_prompt, ...}]}
+```
+
+Sheets persist under `<output>/<slug>/review/sheets/<scene_id>/`. **Read each
+sheet image with vision** and score the scene against the rubric in `prompt`:
+6 dimensions (0.0–10.0), errors with severity (CRITICAL/HIGH/MINOR) +
+time_range + description, usable_segments. Be strict on CRITICAL errors
+(character morph, breed swap, role reversal, brand logo, wrong count) —
+any CRITICAL caps character_consistency at 3.0 and the verdict below
+acceptable.
+
+Submit the scores — the server applies the same validation, severity rules,
+and caps as the CLI backend:
+
+```bash
+curl -s -X POST "http://127.0.0.1:8100/api/videos/<VID>/review-submit" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "<PID>", "mode": "light", "scores": [
+    {"scene_id": "<SID>", "n_frames": 32, "fps": 4.0,
+     "dimensions": {"character_consistency": 8.0, "prompt_adherence": 7.5,
+                    "motion_quality": 7.0, "visual_fidelity": 8.0,
+                    "temporal_coherence": 7.5, "composition": 8.0},
+     "errors": [{"severity": "MINOR", "time_range": "5s-6s",
+                 "description": "background signage garbles"}],
+     "usable_segments": [{"time_range": "0s-8s", "score": 8.0}]}
+  ]}' | python3 -m json.tool
+```
+
+To auto-regenerate bad scenes from your hand scores (bounded by
+`max_regenerations` per scene), pass the same `scores` array to
+`POST /api/videos/<VID>/review-regenerate`.
+
+## Step 3b: CLI review (default, `--by cli`)
 
 ```bash
 curl -X POST "http://127.0.0.1:8100/api/videos/<VID>/review?project_id=<PID>&mode=light&orientation=${ORI}"
@@ -43,13 +97,8 @@ curl -X POST "http://127.0.0.1:8100/api/videos/<VID>/review?project_id=<PID>&mod
 - `mode`: `light` (default) or `deep`
 - `orientation`: auto-detected from meta.json (`${ORI}`)
 
-The API will extract frames from each scene video, send them to Claude Vision, and return per-scene quality scores.
-
-**Poll until complete:**
-```bash
-curl -s http://127.0.0.1:8100/api/requests/<RID>
-# Wait for status: "COMPLETED"
-```
+The API extracts frames from each scene video, sends them to the configured
+review CLI, and returns per-scene quality scores.
 
 ## Step 4: Interpret results
 
@@ -200,19 +249,34 @@ HIGH errors → note `usable_segments` before the error timestamp. Trim or regen
 
 MINOR errors → acceptable for most use cases. Polish optional.
 
-### Prevention Patterns
+### Automatic Prompt Healing (Self-Correction Loop for Scores < 7.5)
 
-| Issue | Fix |
-|-------|-----|
-| Character drift | Simpler prompts, add "steady camera, minimal movement" |
-| Breed swap | Use high color contrast between similar characters |
-| Character count | ONE dominant character, others in background |
-| Reverse motion | Regen video (luck-based, different seed) |
-| Brand logos | Add "no brand logos, no text" to prompt |
-| Camera drift | Add "static camera" or "locked-off shot" to video_prompt |
-| Human hands | Add "paws, claws, hooves" (or correct anatomy) to prompt |
+In compliance with **Critical Rule 16**, any scene scoring below 7.5 undergoes automated diagnostic healing and regeneration (capped at 2 cycles):
+
+1. **Extract Error Vectors from the `errors` Array:**
+   - If error contains `Camera Drift`: Append `locked-off static camera, subtle smooth tracking` to the camera sentence.
+   - If error contains `Character Drift`: Append `strictly preserves identical facial bone structure and eye color from reference`.
+   - If error contains `Object/Anatomy Morph`: Append `natural realistic anatomy, five distinct fingers, rigid solid weapon hilt`.
+   - If error contains `Reverse Motion / Jerk`: Append `continuous linear motion, fluid steady trajectory without backward hitch`.
+
+2. **Update Scene via PATCH (Rule 13):**
+   ```bash
+   curl -X PATCH http://127.0.0.1:8100/api/scenes/<SID> \
+     -H "Content-Type: application/json" \
+     -d '{"video_prompt": "<healed_video_prompt>"}'
+   ```
+
+3. **Dispatch REGENERATE_VIDEO Request:**
+   ```bash
+   curl -X POST http://127.0.0.1:8100/api/requests \
+     -H "Content-Type: application/json" \
+     -d '{"type": "REGENERATE_VIDEO", "scene_id": "<SID>", "project_id": "<PID>", "video_id": "<VID>", "orientation": "${ORI}"}'
+   ```
+
+---
 
 ## Cost Note
+
 
 Each scene review = 1 Claude Vision API call with N frames.
 - Light mode (32 frames/scene): ~$0.01–0.03 per scene

@@ -343,7 +343,45 @@ Negative: subtitles, watermark, text overlay, blurry faces.
 
 ---
 
+## Cinema Lens Profiles & Optical Emulation
+
+Lenses define the soul and optical texture of the image. Rather than using generic words like "cinematic", specify the exact lens package and optical characteristics:
+
+| Lens Package | Prompt Keywords | Visual Signature | Ideal Genre |
+| :--- | :--- | :--- | :--- |
+| **Anamorphic 2.39:1** | `shot on 35mm anamorphic lens, oval bokeh, horizontal blue streak lens flares` | Ultra-widescreen field of view, elliptical bokeh, horizontal cobalt streaks. | Sci-fi, blockbuster action, panoramic battlefields. |
+| **Cooke Panchro / "Cooke Look"** | `Cooke S4/i prime lens, warm organic skin tones, painterly roll-off bokeh` | Flattering organic skin warmth, painterly focus roll-off, vintage character. | Psychological drama, character close-ups, intimate dialogue. |
+| **Arri Master Prime** | `Arri Master Prime lens, ultra-sharp edge-to-edge clarity, neutral high contrast` | Clinical optical resolution, zero aberration, authentic theatrical realism. | Epic warfare, detailed armor, ancient architectural majesty. |
+| **Vintage Leica Summilux** | `Leica Summilux-C vintage glass, creamy soft highlights, subtle micro-contrast` | Creamy highlight bloom, delicate micro-contrast, intimate nostalgic glow. | Atmospheric night exteriors, period flashbacks, candlelight. |
+
+---
+
+## Hollywood Color Grading & Film Stock Matrix
+
+Color palette establishes the emotional tone of the sequence before physical action unfolds:
+
+| Color Grade / Stock | Prompt Keywords | Emotional Atmosphere | Benchmark Context |
+| :--- | :--- | :--- | :--- |
+| **Bleach Bypass (Silver Retention)** | `bleach bypass color grade, high contrast, desaturated muted tones, gritty silver sheen` | Harsh, uncompromising, tragic, militaristic grit. | Blood-soaked combat, ruined citadels in post-siege aftermath. |
+| **Teal & Orange** | `teal and orange color grade, rich amber skin tones against deep cyan shadows` | Vibrant, high kinetic energy, modern blockbuster punch. | High-speed pursuits, night ambushes with blazing torches. |
+| **Kodachrome 64 Vintage** | `Kodachrome 64 aesthetic, deep saturated reds and golds, warm nostalgic film grain` | Historical reverence, nostalgic warmth, timeless prestige. | Childhood retrospectives, coronation banquets, imperial glory. |
+| **Chiaroscuro Night** | `chiaroscuro lighting, deep crushing black shadows, single directional candlelight source` | Paranoia, perilous conspiracy, claustrophobic power struggle. | Palace palace coup meetings, late-night war councils. |
+
+---
+
+## The 180-Degree Rule in AI Direction (Spatial Continuity)
+
+In consecutive dialogue shots between two opposing characters or armies:
+- **Core Principle:** An imaginary line of action connects the two subjects. The camera **must remain strictly on one side** of this axis across consecutive cuts.
+- **Eyeline Vector Matching:**
+  - **Character A (Close-up):** `looking screen-right towards opponent`.
+  - **Character B (Close-up):** `looking screen-left towards opponent`.
+  - *If both characters are prompted looking screen-right, the audience perceives them gazing in the same direction rather than making direct eye contact.*
+
+---
+
 ## Quality Checklist
+
 
 Before submitting any video prompt, verify:
 

@@ -9,6 +9,7 @@ class VideoCreate(BaseModel):
     description: Optional[str] = None
     display_order: int = 0
     orientation: Optional[str] = None
+    target_duration_s: Optional[float] = None
 
 
 class VideoUpdate(BaseModel):
@@ -21,6 +22,7 @@ class VideoUpdate(BaseModel):
     horizontal_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
     duration: Optional[float] = None
+    target_duration_s: Optional[float] = None
     resolution: Optional[str] = None
     youtube_id: Optional[str] = None
     privacy: Optional[str] = None
@@ -39,6 +41,7 @@ class Video(BaseModel):
     horizontal_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
     duration: Optional[float] = None
+    target_duration_s: Optional[float] = None
     resolution: Optional[str] = None
     youtube_id: Optional[str] = None
     privacy: str = "unlisted"

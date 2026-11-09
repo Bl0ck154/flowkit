@@ -2,36 +2,76 @@
 
 Workflow skills for AI agents and humans. Each skill is a step-by-step recipe.
 
-## Pipeline (run in order)
+## Core Production Pipeline
 
 | # | Skill | File | Description |
 |---|-------|------|-------------|
-| 1 | `fk-create-project` | [fk-create-project.md](fk-create-project.md) | Create project + entities + video + scenes |
-| 2 | `fk-gen-refs` | [fk-gen-refs.md](fk-gen-refs.md) | Generate reference images for all entities |
-| 3 | `fk-gen-images` | [fk-gen-images.md](fk-gen-images.md) | Generate scene images with character refs |
-| 4 | `fk-gen-videos` | [fk-gen-videos.md](fk-gen-videos.md) | Generate videos from scene images |
-| 5 | `fk-concat` | [fk-concat.md](fk-concat.md) | Download + merge all scene videos |
+| 0 | `fk-research` | [fk-research.md](fk-research.md) | Fact-check events and research historical/story lore before scripting |
+| 1 | `fk-scriptwriter` | [fk-scriptwriter.md](fk-scriptwriter.md) | The Ultimate AI Screenplay Bible (10 Archetypes, 8s Arcs, Quality Gates) |
+| 2 | `fk-create-project` | [fk-create-project.md](fk-create-project.md) | Create project + entities + video + scenes |
+| 3 | `fk-gen-refs` | [fk-gen-refs.md](fk-gen-refs.md) | Generate reference images for all entities |
+| 4 | `fk-gen-images` | [fk-gen-images.md](fk-gen-images.md) | Generate scene images with character refs bound |
+| 5 | `fk-gen-videos` | [fk-gen-videos.md](fk-gen-videos.md) | Generate videos from scene images via Veo 3 / Flow |
+| 6 | `fk-review-video` | [fk-review-video.md](fk-review-video.md) | AI Vision quality check with prompt healing loop (pass score >= 7.5) |
+| 7 | `fk-concat-fit-narrator` | [fk-concat-fit-narrator.md](fk-concat-fit-narrator.md) | Trim scene videos to TTS duration, burn hardsubs, assemble multi-chapter film |
+| 8 | `fk-concat` | [fk-concat.md](fk-concat.md) | Download + merge all scene videos (basic stream concat) |
 
-## Advanced Video
-
-| Skill | File | Description |
-|-------|------|-------------|
-| `fk-gen-chain-videos` | [fk-gen-chain-videos.md](fk-gen-chain-videos.md) | Auto start+end frame chaining for smooth transitions |
-| `fk-insert-scene` | [fk-insert-scene.md](fk-insert-scene.md) | Multi-angle shots, cutaways, close-ups |
-| `fk-creative-mix` | [fk-creative-mix.md](fk-creative-mix.md) | Analyze story + suggest all techniques combined |
-
-## Reference
+## Cinematography, Direction & Choreography
 
 | Skill | File | Description |
 |-------|------|-------------|
-| `fk-camera-guide` | [fk-camera-guide.md](fk-camera-guide.md) | Camera angles, movements, lighting, DOF for cinematic video prompts |
+| `fk-camera-guide` | [fk-camera-guide.md](fk-camera-guide.md) | Lens packages, Hollywood lighting & color grading matrix, 180° rule |
+| `fk-action-choreography` | [fk-action-choreography.md](fk-action-choreography.md) | Physics-safe combat direction & 3-phase motion invariants for Veo 3 |
+| `fk-cinematic-transitions` | [fk-cinematic-transitions.md](fk-cinematic-transitions.md) | Chapter bumpers (Ken Burns + sub-bass drone), match cuts, J-cut/L-cut |
+| `fk-gen-chain-videos` | [fk-gen-chain-videos.md](fk-gen-chain-videos.md) | Auto start+end frame chaining for continuous transitions |
+| `fk-insert-scene` | [fk-insert-scene.md](fk-insert-scene.md) | Multi-angle shots, cutaways, close-ups insertion |
+| `fk-creative-mix` | [fk-creative-mix.md](fk-creative-mix.md) | Analyze story + suggest optimal combination of all cinematic techniques |
 
-## Utilities
+## Character & World Consistency
 
 | Skill | File | Description |
 |-------|------|-------------|
-| `fk-status` | [fk-status.md](fk-status.md) | Full project dashboard + next action |
-| `fk-fix-uuids` | [fk-fix-uuids.md](fk-fix-uuids.md) | Repair any CAMS... media_ids to UUID format |
+| `fk-character-bible` | [fk-character-bible.md](fk-character-bible.md) | Biometric anchor sheets, wardrobe state matrices & series manifest engine |
+| `fk-add-material` | [fk-add-material.md](fk-add-material.md) | Image material management (realistic, 3d_pixar, anime, etc.) |
+| `fk-upload-image` | [fk-upload-image.md](fk-upload-image.md) | Upload local images to Google Flow to get UUID media_ids |
+| `fk-fix-uuids` | [fk-fix-uuids.md](fk-fix-uuids.md) | Repair legacy CAMS... media_ids to standard UUID format |
+| `fk-refresh-urls` | [fk-refresh-urls.md](fk-refresh-urls.md) | Re-sign expired media URLs for scenes and entity reference images |
+
+## Audio, Voice & Sound Design
+
+| Skill | File | Description |
+|-------|------|-------------|
+| `fk-sound-design` | [fk-sound-design.md](fk-sound-design.md) | 4-layer audio design, sidechain ducking (-14dB), sub-bass drone, procedural SFX |
+| `fk-gen-music` | [fk-gen-music.md](fk-gen-music.md) | Generate soundtracks & orchestral scores via Suno AI |
+| `fk-gen-narrator` | [fk-gen-narrator.md](fk-gen-narrator.md) | Edge-TTS neural narration with pacing punctuation & voice profiles |
+| `fk-gen-tts-template` | [fk-gen-tts-template.md](fk-gen-tts-template.md) | Generate consistent voice templates for narration |
+| `fk-import-voice` | [fk-import-voice.md](fk-import-voice.md) | Import existing voice recordings as templates |
+| `fk-gen-text-overlays` | [fk-gen-text-overlays.md](fk-gen-text-overlays.md) | Extract dates, names, casualty statistics for on-screen text overlays |
+
+## Distribution, YouTube SEO & Branding
+
+| Skill | File | Description |
+|-------|------|-------------|
+| `fk-brand-logo` | [fk-brand-logo.md](fk-brand-logo.md) | Channel intro/outro bumpers, corner watermark logo, 4K resolution badge |
+| `fk-thumbnail-guide` | [fk-thumbnail-guide.md](fk-thumbnail-guide.md) | YouTube thumbnail rules, high-CTR composition & 3-second hook principles |
+| `fk-thumbnail` | [fk-thumbnail.md](fk-thumbnail.md) | Generate 4 YouTube thumbnail variants with high-impact typography |
+| `fk-youtube-seo` | [fk-youtube-seo.md](fk-youtube-seo.md) | Generate high-converting hook titles, 3-zone descriptions, tags & AI disclosures |
+| `fk-youtube-upload` | [fk-youtube-upload.md](fk-youtube-upload.md) | Automated YouTube API video upload (Shorts & Long-form) |
+
+## Operations, Monitoring & Provider Management
+
+| Skill | File | Description |
+|-------|------|-------------|
+| `fk-status` | [fk-status.md](fk-status.md) | Comprehensive project status dashboard + recommended next action |
+| `fk-dashboard` | [fk-dashboard.md](fk-dashboard.md) | Terminal statusline monitor for GLA and active tasks |
+| `fk-monitor` | [fk-monitor.md](fk-monitor.md) | Full pipeline queue monitor with live background polling |
+| `fk-doctor` | [fk-doctor.md](fk-doctor.md) | End-to-end diagnostic suite & error taxonomy resolver |
+| `fk-pipeline` | [fk-pipeline.md](fk-pipeline.md) | Autonomous full-pipeline orchestrator from research to final concat |
+| `fk-provider` | [fk-provider.md](fk-provider.md) | Select and manage media generation backend (Flow vs Assistant) |
+| `fk-change-provider` | [fk-change-provider.md](fk-change-provider.md) | Switch AI vision review backend (Claude, Antigravity, Codex) |
+| `fk-change-model` | [fk-change-model.md](fk-change-model.md) | View and configure image and video generation model keys |
+| `fk-switch-project` | [fk-switch-project.md](fk-switch-project.md) | Switch active working project context |
+| `fk-review-board` | [fk-review-board.md](fk-review-board.md) | Launch visual scene review board web app |
 
 ## Cross-Tool Compatibility
 
@@ -47,10 +87,15 @@ python setup.py clean     # Remove generated configs
 | Tool | Generated Config | Instruction File | Invocation |
 |------|-----------------|------------------|------------|
 | Claude Code | `.claude/commands/fk-<name>.md` (stubs) | `CLAUDE.md` (committed) | `/fk-<name>` |
-| Gemini CLI | `.gemini/commands/fk/<name>.toml` | `GEMINI.md` (generated) | `/fk-<name>` |
 | Codex CLI | — | `AGENTS.md` (generated) | Read `skills/fk-<name>.md` |
+| Antigravity IDE | `.agents/skills/fk-<name>/SKILL.md` | Workspace Skills | `/fk-<name>` or Skill Discovery |
 
 **Adding a new skill:** Create `skills/fk-<name>.md`, then run `python setup.py sync`.
+
+**Never hand-edit `AGENTS.md`** — it says so at the top and it means it. Rules
+added there directly are deleted by the next `sync`. Put them in `setup.py`'s
+`_CRITICAL_RULES` or `_PIPELINE_OVERVIEW` instead, which is where the file is
+built from.
 
 ---
 

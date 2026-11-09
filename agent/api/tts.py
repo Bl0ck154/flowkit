@@ -66,9 +66,17 @@ def _validate_ref_audio(ref_audio: str) -> None:
 
 @router.post("/tts/generate", response_model=TTSGenerateResponse)
 async def tts_generate(body: TTSGenerateRequest):
-    """Generate speech for a single text string. Returns path to WAV file."""
+    """Generate speech for a single text string. Returns path to WAV file.
+
+    provider="local" (default) uses the bundled TTS engine; any other
+    provider name dispatches a provider job (kind=audio) to an external
+    worker via the media provider registry.
+    """
     if body.ref_audio:
         _validate_ref_audio(body.ref_audio)
+
+    if body.provider and body.provider.strip().lower() != "local":
+        return await _tts_generate_via_provider(body)
 
     SHARED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     import uuid as _uuid
@@ -90,6 +98,59 @@ async def tts_generate(body: TTSGenerateRequest):
 
     duration = _wav_duration(audio_path)
     return TTSGenerateResponse(audio_path=audio_path, duration=duration)
+
+
+async def _tts_generate_via_provider(body: TTSGenerateRequest) -> TTSGenerateResponse:
+    """Dispatch TTS to a media provider (provider-job queue + external worker)."""
+    from agent.config import DEFAULT_PROVIDER
+    from agent.sdk.services.operations import get_operations
+    from agent.sdk.services.provider_base import KIND_AUDIO, ProviderJob
+
+    provider_name = (body.provider or DEFAULT_PROVIDER).strip().lower()
+    registry = get_operations().registry
+    provider = registry.get(provider_name)
+    if provider is None:
+        raise HTTPException(400, f"Unknown provider '{provider_name}' (available: {registry.names()})")
+
+    import uuid as _uuid
+
+    job = ProviderJob(
+        job_id=f"tts-{_uuid.uuid4().hex[:12]}",
+        kind=KIND_AUDIO,
+        prompt=body.text,
+        orientation="VERTICAL",  # unused for audio; required field
+        extra={"instruct": body.instruct, "ref_audio": body.ref_audio,
+               "ref_text": body.ref_text, "speed": body.speed},
+    )
+    blocked = provider.check(job)
+    if blocked:
+        raise HTTPException(400, blocked)
+
+    raw = await provider.run(job)
+    if raw.get("error"):
+        raise HTTPException(502, raw["error"])
+    data = raw.get("data") or {}
+    url = data.get("url") or ""
+    audio_path = data.get("audio_path") or url
+
+    if url.startswith("http"):
+        # Download remote audio into the shared output dir.
+        SHARED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        import uuid as _uuid
+        dest = SHARED_OUTPUT_DIR / f"provider_tts_{_uuid.uuid4()}.wav"
+        try:
+            await asyncio.to_thread(_download_url, url, str(dest))
+            audio_path = str(dest)
+        except Exception as e:
+            raise HTTPException(502, f"Failed to download provider audio: {e}")
+
+    duration = _wav_duration(audio_path) if audio_path else None
+    return TTSGenerateResponse(audio_path=audio_path or url, duration=duration)
+
+
+def _download_url(url: str, dest: str) -> None:
+    import urllib.request
+    urllib.request.urlretrieve(url, dest)
 
 
 @router.post("/videos/{vid}/narrate", response_model=NarrateVideoResponse)
@@ -296,13 +357,13 @@ async def delete_voice_template(name: str):
 
 def _load_templates_meta() -> dict:
     if TEMPLATES_META.exists():
-        return json.loads(TEMPLATES_META.read_text())
+        return json.loads(TEMPLATES_META.read_text(encoding="utf-8"))
     return {}
 
 
 def _save_templates_meta(meta: dict):
     TEMPLATES_META.parent.mkdir(parents=True, exist_ok=True)
-    TEMPLATES_META.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+    TEMPLATES_META.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _wav_duration(path: str) -> float | None:

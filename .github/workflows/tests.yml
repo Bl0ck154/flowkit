@@ -1,3 +1,6 @@
+# Nothing ran the tests on push or PR before this, so a broken main was only
+# ever caught by hand. PR #48 reached `main` carrying an ImportError against a
+# module a merged PR had deleted; this job is what catches that class of thing.
 name: tests
 
 on:
@@ -5,17 +8,25 @@ on:
   push:
     branches: [main]
 
+# A new push supersedes the run in flight for the same ref.
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    # Pin to a stable runner while ubuntu-latest transitions to Ubuntu 26.04.
+    # Tooling (including ffmpeg/fonts) differs during the rollout.
+    runs-on: ubuntu-24.04
+    # The suite takes ~7s. A ceiling this generous only ever trips on a hang,
+    # which this suite has had before: an aiosqlite connection left open keeps a
+    # non-daemon worker thread alive and the interpreter never exits.
     timeout-minutes: 10
+
     strategy:
       fail-fast: false
       matrix:
+        # The floor the README advertises, and the version development runs on.
         python-version: ["3.10", "3.13"]
 
     steps:
@@ -29,15 +40,53 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
-      - name: Install media dependencies
+      - name: Ensure ffmpeg and fonts
+        # Hosted Ubuntu images can already include both. Unconditional apt
+        # update has hung until the 10-minute job timeout (Python 3.13 CI),
+        # preventing the test suite from running at all. Only install what is
+        # missing and bound apt network operations so the failure is visible.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+          if command -v ffmpeg >/dev/null && \
+             command -v fc-match >/dev/null && \
+             fc-match "DejaVu Sans" | grep -qi "DejaVu"; then
+            echo "ffmpeg and DejaVu font are already available"
+          else
+            timeout 90s sudo apt-get update \
+              -o Acquire::Retries=1 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15
+            timeout 90s sudo env DEBIAN_FRONTEND=noninteractive apt-get install \
+              -y --no-install-recommends ffmpeg fonts-dejavu-core
+          fi
+          command -v ffmpeg
 
-      - name: Install Python dependencies
+      - name: Report whether drawtext renders
+        # This used to fail the build, because naming an absent filter aborted
+        # the whole chain and took 13 tests down with it. video_reviewer.py now
+        # probes for drawtext and drops it when it is missing, so its absence
+        # is a supported degradation (sheets lose their burned-in timestamps)
+        # rather than a build breaker — and the fallback has its own coverage.
+        #
+        # The check stays because the timestamped path is the better one and a
+        # silent loss of it is worth seeing in the log. Checking
+        # `ffmpeg -filters` would only prove the filter is compiled in, not
+        # that a font exists, so render a real frame through the filter the
+        # code uses.
+        run: |
+          ffmpeg -hide_banner -loglevel error \
+            -f lavfi -i "testsrc=duration=1:size=320x240:rate=5" \
+            -vf "drawtext=text='%{pts\:hms}':x=5:y=5:fontsize=14:fontcolor=white:borderw=1:bordercolor=black" \
+            -frames:v 1 -y /tmp/drawtext-smoke.jpg \
+            && echo "drawtext renders — contact sheets will carry timestamps" \
+            || {
+              echo "::warning::ffmpeg cannot render drawtext (no --enable-libfreetype, or no font). Sheets will be untimestamped; the suite still covers that path."
+              ffmpeg -hide_banner -version | head -3
+            }
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run unit tests
         env:

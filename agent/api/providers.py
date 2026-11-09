@@ -35,14 +35,37 @@ logger = logging.getLogger(__name__)
 _PROVIDERS_FILE = Path(__file__).parent.parent / "providers.json"
 
 
+# ── Media providers (generation backends) ───────────────────────────────
+# NOTE: this router also serves the CLI-provider config API below
+# (which AI CLI each role runs on). "Media providers" is the separate
+# concept of which backend renders media: Google Flow, the assistant
+# (Pax), or any registered HTTP-capable provider. Kept on the same
+# /api/providers prefix because the preflight docs point here.
+
+@router.get("/status")
+async def get_media_provider_status():
+    """Status of every registered media provider (generation backend).
+
+    Returns name, display name, availability, and capabilities
+    (including per-provider throttling limits: max_concurrent,
+    cooldown_s). Flow is available only while the Chrome extension is
+    connected; the assistant backend needs no Chrome.
+    """
+    from agent.sdk.services.operations import get_operations
+    return {
+        "default": config.DEFAULT_PROVIDER,
+        "providers": get_operations().registry.status(),
+    }
+
+
 def _read() -> dict:
-    """Read providers.json and hot-reload it into `config.CLI_PROVIDERS`.
+    """Read providers.json from disk and refresh config.CLI_PROVIDERS in place.
 
     The file is the source of truth, and it is editable by hand (the skills
     do), so re-reading it here is what makes a hand edit take effect without a
     restart — and what stops a GET describing a state the worker is not in.
     """
-    with open(_PROVIDERS_FILE) as f:
+    with open(_PROVIDERS_FILE, encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("active", "claude")
     data.setdefault("roles", {})
@@ -63,7 +86,7 @@ def _write(data: dict):
     """
     tmp = _PROVIDERS_FILE.with_suffix(".json.tmp")
     try:
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
             f.flush()
@@ -112,8 +135,9 @@ async def get_providers(live: bool = False):
     data = _read()
     statuses = {}
     for name, binary in PROVIDER_BINARIES.items():
-        installed = shutil.which(binary) is not None
-        tested, error = (await _probe_version(binary)) if (live and installed) else (None, None)
+        # `muse` is the assistant itself — always available, no binary to probe.
+        installed = True if binary is None else shutil.which(binary) is not None
+        tested, error = (await _probe_version(binary)) if (live and installed and binary) else (None, None)
         statuses[name] = {
             "binary": binary,
             "installed": installed,
@@ -182,6 +206,8 @@ async def patch_providers(body: dict):
         provider = body["active"]
         if provider not in PROVIDER_BINARIES:
             raise HTTPException(400, f"Unknown provider '{provider}'. Known: {list(PROVIDER_BINARIES)}")
+        if PROVIDER_BINARIES[provider] is None:
+            raise HTTPException(400, f"'{provider}' has no CLI binary — it is only valid as a per-role provider, not as the active default")
         if not shutil.which(PROVIDER_BINARIES[provider]):
             raise HTTPException(400, f"'{PROVIDER_BINARIES[provider]}' binary not found on PATH — install it first")
         data["active"] = provider

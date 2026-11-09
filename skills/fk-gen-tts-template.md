@@ -4,6 +4,13 @@ Create a reusable voice template for consistent narration across all scenes.
 
 **IMPORTANT:** Always create a voice template BEFORE narrating scenes. Without a template, each scene generates with a slightly different voice. With a template, voice cloning ensures 100% consistency.
 
+## Provider (optional)
+
+`/api/tts/generate` accepts `"provider"`: omit it (or `"local"`) for the
+bundled TTS engine, or `"assistant"` to dispatch a provider job (the worker's
+provider must support audio). `flow` is rejected with 400 — it has no audio
+capability. See `/fk-provider`.
+
 ## Prerequisites
 
 - GLA server running: `curl http://127.0.0.1:8100/health`

@@ -1,8 +1,8 @@
 """Persistent lease for ad-hoc Flow API work.
 
 Direct callers that do not own a durable Flow project share one project while
-there is recent activity. The lease survives tab parking and agent restarts and
-rotates after the configured idle interval.
+there is recent activity. The lease survives agent restarts and rotates after
+the configured idle interval.
 """
 from __future__ import annotations
 
@@ -17,7 +17,12 @@ from pathlib import Path
 from agent.config import BASE_DIR, FLOW_SESSION_PROJECT_IDLE_S
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-_STATE_PATH = Path(os.environ.get("FLOW_SESSION_PROJECT_STATE", str(BASE_DIR / "flow_session_project.json")))
+_STATE_PATH = Path(
+    os.environ.get(
+        "FLOW_SESSION_PROJECT_STATE",
+        str(BASE_DIR / "flow_session_project.json"),
+    )
+)
 _lock = asyncio.Lock()
 
 
@@ -65,7 +70,6 @@ async def ensure_session_project(client, *, title: str | None = None, force_new:
         state = current_session_project()
         if not force_new and state.get("active") and state.get("project_id"):
             touch_session_project(state["project_id"])
-            client._batch_active_project = state["project_id"]
             return current_session_project()
 
         if not title:
@@ -84,5 +88,4 @@ async def ensure_session_project(client, *, title: str | None = None, force_new:
             "last_activity_at": time.time(),
         }
         _write_state(state)
-        client._batch_active_project = pid
         return current_session_project()

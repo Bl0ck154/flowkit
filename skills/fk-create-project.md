@@ -112,9 +112,8 @@ FlowKit can create real Flow projects through the current `jHPbke`
 reuse of an existing Flow project is required.
 
 Ad-hoc `/api/flow/*` calls may omit `project_id`; FlowKit then uses a persistent
-session project. The session survives Flow-tab parking and agent restarts and
-rotates after 2 hours of generation/upload inactivity by default
-(`FLOW_SESSION_PROJECT_IDLE_S`). Do not pin routine work to `FLOW_PROJECT_ID`.
+session project. The session survives agent restarts and rotates after 2 hours
+of inactivity by default (`FLOW_SESSION_PROJECT_IDLE_S`).
 
 ```bash
 curl -s http://127.0.0.1:8100/api/flow/status | python3 -c "

@@ -32,7 +32,6 @@ def client(monkeypatch):
     envelope as well as on what came back.
     """
     import agent.services.flow_client as module
-    monkeypatch.setattr(module, "USE_BATCH_RPC", True)
     monkeypatch.setattr(module, "FLOW_PROJECT_ID", PROJECT)
     monkeypatch.setattr(module, "FLOW_ALLOW_DEGRADED", False)
 
@@ -72,7 +71,7 @@ class TestGenerateImages:
         assert item[2] == [["ref-a", None, None, None, fb.REF_TYPE_IMAGE],
                            ["ref-b", None, None, None, fb.REF_TYPE_IMAGE]]
 
-    async def test_explicit_model_and_count_dispatch_as_ui_style_parallel_rpcs(self, client, monkeypatch):
+    async def test_explicit_model_and_count_dispatch_as_ui_style_rpcs(self, client, monkeypatch):
         import agent.services.flow_client as module
         sleeps = []
 
@@ -87,10 +86,7 @@ class TestGenerateImages:
             "a cat", PROJECT, image_model="HARBOR_SEAL", count=2, seed=100,
         )
         assert len(client.calls) == 2
-        items = [
-            json.loads(json.loads(call["freq"])[0][0][1])[1]
-            for call in client.calls
-        ]
+        items = [json.loads(json.loads(call["freq"])[0][0][1])[1] for call in client.calls]
         assert [len(group) for group in items] == [1, 1]
         assert [group[0][5] for group in items] == ["HARBOR_SEAL", "HARBOR_SEAL"]
         assert [group[0][3] for group in items] == [100, 100 + 9973]
@@ -98,7 +94,7 @@ class TestGenerateImages:
         assert sleeps == [module.IMAGE_UI_SUBMIT_OFFSETS_S[1]]
         assert len(result["data"]["media"]) == 2
 
-    async def test_count_four_uses_captured_flow_ui_launch_offsets(self, client, monkeypatch):
+    async def test_count_four_uses_captured_ui_launch_offsets(self, client, monkeypatch):
         import agent.services.flow_client as module
         sleeps = []
 
@@ -232,6 +228,22 @@ class TestEditImage:
         item = json.loads(json.loads(client.calls[0]["freq"])[0][0][1])[1][0]
         assert [ref[0] for ref in item[2]] == ["src-1", "ref-a"]
         assert [ref[4] for ref in item[2]] == [fb.BASE_TYPE_IMAGE, fb.REF_TYPE_IMAGE]
+
+
+class TestUpscaleImage:
+    async def test_2k_upscale_uses_sprcad_and_returns_encoded_image(self, client):
+        encoded = "A" * 200
+        client.responses[fb.RPC_UPSCALE_IMAGE] = {
+            "data": envelope(fb.RPC_UPSCALE_IMAGE, [["media-record"], encoded])
+        }
+        result = await client.upscale_image(MEDIA, PROJECT, "2K")
+        assert result["data"]["encodedImage"] == encoded
+        assert result["data"]["resolution"] == "2K"
+        assert client.calls[0]["rpcid"] == fb.RPC_UPSCALE_IMAGE
+        assert client.calls[0]["captcha"] == fb.CAPTCHA_IMAGE
+        payload = json.loads(json.loads(client.calls[0]["freq"])[0][0][1])
+        assert payload[0] == MEDIA
+        assert payload[1] == 1
 
 
 class TestGenerateVideo:

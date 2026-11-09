@@ -5,8 +5,9 @@ Diagnose any FlowKit error and prescribe a fix. Knows the full error taxonomy ac
 **TRIGGER (auto-invoke) when:**
 - Any `/api/requests/*` response has `status=FAILED` or `error_message` is set
 - A request has been `PROCESSING` for > 10 minutes with no progress
+- A provider job is stuck `QUEUED` (no worker), `CLAIMED` past its lease, or `FAILED` — or any `/api/provider-jobs/*` call returns 409
 - `GET /health` returns `extension_connected: false`
-- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_KEY`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
+- User reports any error string containing: `UNSAFE_GENERATION`, `QUOTA`, `not found`, `CAPTCHA`, `UNUSUAL_ACTIVITY`, `NO_AT_TOKEN`, `NO_FLOW_PROJECT`, `UNSUPPORTED_ON_BATCH_API`, `NO_FLOW_TAB`, `FLOW_TAB_DISCARDED`, `NO_INJECTION_RESULT`, `extension_switched`, `Failed to fetch`, `MODEL_ACCESS_DENIED`, `PAYGATE_TIER_TWO`, `invalidTags`, `quotaExceeded`, `invalid_grant`
 - User asks "why did X fail", "what's wrong with the pipeline", "why is this stuck", "tại sao X lỗi", "lỗi gì vậy"
 - An HTTP 4xx/5xx reaches the main agent from any endpoint under `127.0.0.1:8100`
 - A YouTube upload returns `HttpError` from `googleapiclient`
@@ -45,9 +46,16 @@ curl -s "http://127.0.0.1:8100/api/requests?status=FAILED&limit=20"
 
 # Stuck in PROCESSING > 10 min
 curl -s "http://127.0.0.1:8100/api/requests?status=PROCESSING"
+
+# Provider jobs (assistant / external workers)
+curl -s "http://127.0.0.1:8100/api/provider-jobs?limit=20"
 ```
 
 Bucket the failures by `error_message` prefix, print a table, and for each bucket give the fix from the taxonomy.
+For requests with a `provider` other than `flow` or `muse2api`, also read the linked
+provider job (`provider_job_id` on the request row): a `QUEUED` job with no
+worker means `assistant_worker.py` isn't running; a `FAILED` job carries the
+worker's `error_message`.
 
 ## Mode 2: Single request (`/fk-doctor <RID>`)
 
@@ -61,6 +69,8 @@ Read:
 - `retry_count` — will it retry? (MAX_RETRIES=5)
 - `type` — GENERATE_IMAGE / GENERATE_VIDEO / UPSCALE_VIDEO / GENERATE_CHARACTER_IMAGE
 - Linked scene_id / character_id for re-upload context
+- `provider` + `provider_job_id` — for non-flow providers, read the provider
+  job row (`status`, `claimed_by`, `error_message`) before anything else
 
 Cross-reference `error_message` against the taxonomy below. Print: **Diagnosis / Cause / Auto-handling / Manual fix**.
 
@@ -68,25 +78,23 @@ Cross-reference `error_message` against the taxonomy below. Print: **Diagnosis /
 
 Match against taxonomy — even partial matches (`"not found"`, `"captcha"`, `"quota"`).
 
-## Which transport is running
+## The transport
 
-Since Flow moved to `flow.google.com` (September 2026) there are two paths, and
-the taxonomy below splits on which one is live:
+One path since Flow moved to `flow.google.com` (September 2026):
 
 ```bash
-python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
-  print('batch' if USE_BATCH_RPC else 'legacy REST', '| project:', FLOW_PROJECT_ID or 'UNPINNED')"
+python3 -c "from agent.config import FLOW_PROJECT_ID; \
+  print('batch | project:', FLOW_PROJECT_ID or 'UNPINNED')"
 ```
 
-- **batch** (default) — the agent builds an `f.req` envelope, the extension runs
-  it inside a signed-in `flow.google.com` tab. No bearer token exists on this
-  path, so `flow_key_present: false` in `/api/flow/status` is **normal**, not a
-  fault. Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
-- **legacy REST** (`USE_BATCH_RPC=0`) — the pre-migration `aisandbox-pa` path.
-  It needs a `Bearer ya29.…` Flow no longer mints, so it will 401 on any fresh
-  profile. Treat any report of it "suddenly breaking" as the migration, not a
-  regression: if `token_age_s` only climbs across tab reloads, the token is not
-  stale, it is gone.
+The agent builds an `f.req` envelope and the extension runs it inside a
+signed-in `flow.google.com` tab. **No bearer token exists on this path**, so
+`flow_key_present: false` in `/api/flow/status` is normal, not a fault.
+Requires a Flow tab open and `FLOW_PROJECT_ID` pinned.
+
+The `aisandbox-pa` REST path that preceded it has been removed — it needed a
+`Bearer ya29.…` Flow no longer mints. If an old report mentions it, that is the
+migration, not a regression.
 
 ## Error Taxonomy
 
@@ -100,20 +108,20 @@ python3 -c "from agent.config import USE_BATCH_RPC, FLOW_PROJECT_ID; \
 | `Requested entity was not found` | Uploaded `media_id` expired (~1h TTL on uploads) | `_recover_entity_not_found` re-uploads from `image_url`, re-queues PENDING | If auto-recovery fails: manually `POST /api/upload-image`, patch `media_id` |
 | `Internal error encountered` | Flow backend transient 500 | Exponential backoff: `2^retry * 10s`, capped 300s | None — wait, or retry manually after a minute |
 | `reCAPTCHA failed` / (contains `captcha`) | Extension couldn't solve reCAPTCHA | Retry ≤10× without consuming `retry_count` (processor.py:454-464) | Ensure a Google Flow tab is open and focused; reload extension |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (message `reCAPTCHA evaluation failed`) | On 2026-09-23 we confirmed a transport-specific cause: Flow's exposed `grecaptcha.enterprise.execute()` rewrites injected/direct calls to action `extension_hijack_detected`, while a real Generate UI gesture mints `IMAGE_GENERATION` / `VIDEO_GENERATION`. The otherwise-identical batch request is then rejected by Google's risk evaluation. Genuine rate/network trust blocks can still produce the same public error. | **Never auto-retry.** Current FlowKit generation submits use Flow's real UI + trusted browser input; upload/create/poll/media stay direct batch. | First confirm the running build contains the UI-generation transport. If a current UI-path submit still fails, pause submits and test one manual Generate in the same server Chrome. Manual success means inspect UI transport/capture; manual failure points to account/session/network trust. Do not rotate public proxies or blindly clear the Google account. |
+| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (403, message `reCAPTCHA evaluation failed`) | Google flagged the session as bot-like — usually triggered by rapid bursts of submits (e.g. many GENERATE_VIDEO in <1 minute), shared/VPN IP, or stale auth cookies | NOT auto-handled — Google blocks even fresh requests until the trust signal recovers | (1) **Stop the worker / pipeline** so submits pause. (2) Open Chrome → `chrome://settings/cookies` (or the extension's Chrome profile) → search `google.com` and `labs.google` → **remove all cookies for both**. (3) Reload `https://flow.google.com` and sign back in (re-solve any reCAPTCHA puzzles manually). (4) Slow down submission cadence (≥1s gap between submits, ≤5 concurrent). If still blocked, switch to a different network or wait 1–6 h |
 
 ### B. HTTP status codes
 
 | Status | Origin | When you see it |
 |--------|--------|-----------------|
 | **400** | Flow API | Invalid payload / UNSAFE / entity-not-found — **route by `details.reason`** |
-| **401** | Flow API (legacy path only) | Bearer expired — and on a post-migration profile it is not expired, it was never minted. Switch to the batch path |
+| **401** | Flow API | Should not happen — batchexecute authenticates in the page, not with a bearer. Check the Flow tab is signed in; see `NO_AT_TOKEN` |
 | **403** | Extension (`background.js:432`) | `CAPTCHA_FAILED`, `NO_FLOW_TAB`, or `MODEL_ACCESS_DENIED` — read the suffix |
 | **404** | Flow API | `media_id` not found — same handler as "entity not found" |
 | **429** | Flow API | Rate-limit or quota — backoff; if message mentions QUOTA_REACHED, terminal |
 | **500** | Flow backend **or** extension fetch exception (`background.js:504`) | Transient — retry with backoff |
 | **502** | FastAPI (`agent/api/flow.py:80,92`) | Extension returned error without explicit status — treat as transient |
-| **503** | FastAPI | "Extension not connected" or `NO_FLOW_KEY` — worker re-queues PENDING, waits |
+| **503** | FastAPI | "Extension not connected" — worker re-queues PENDING, waits |
 | **504** | Agent | 60s WS timeout waiting for extension — transient, re-queue |
 
 Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as an error if ANY of these hold:
@@ -128,7 +136,6 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `Extension not connected` | WS dropped or extension offline | Reload extension at `chrome://extensions`; worker auto-retries |
 | `extension reconnected` / `extension disconnected` | WS bounce mid-request | Auto re-queue, `retry_count` NOT incremented |
 | `extension_switched` | User switched active Flow tab | Auto re-queue |
-| `NO_FLOW_KEY` | No bearer token captured — **legacy path only**; expected and harmless on the batch path | Only meaningful with `USE_BATCH_RPC=0`; otherwise ignore |
 | `NO_FLOW_TAB` | No Flow tab for CAPTCHA solve or RPC signing | Open `https://flow.google.com/` and sign in |
 | `Failed to fetch` | Network drop inside service worker | Auto-retry with backoff |
 | WS 60s timeout | Extension hung | Reload extension; worker re-queues |
@@ -140,9 +147,11 @@ Detection lives in `agent/worker/_parsing.py:_is_error`. A result is treated as 
 | `NO_AT_TOKEN` | The Flow tab loaded but `WIZ_global_data.SNlM0e` is absent — the page is signed out, on an interstitial, or still booting | Retried with backoff | Open `https://flow.google.com/`, confirm you are signed in, let the app finish loading |
 | `NO_FLOW_TAB` | No Flow tab to sign the request | Extension opens one and retries once | Leave one signed-in Flow tab open; nothing here works headless |
 | `FLOW_TAB_DISCARDED` | Chrome discarded the backgrounded tab and the reload did not revive it | Retried with backoff | Pin the Flow tab, or keep its window visible |
-| `NO_FLOW_PROJECT` | A low-level caller reached batchexecute without a project id | **Terminal — not retried** | Use `POST /api/projects` to create a real Flow project, or call the public `/api/flow/*` endpoints without `project_id` so the 2h session-project lease resolves one automatically |
-| `UNSUPPORTED_ON_BATCH_API` | A requested capability still lacks a captured current Flow payload | **Terminal — not retried** | Read the feature named in the error and capture its current UI payload via `docs/CAPTURE.md`; do not assume older unsupported-feature lists are still current |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` | Google rejected the generation's reCAPTCHA/risk context. Older direct-mint builds are known to receive `extension_hijack_detected` even when the same browser succeeds manually. | **Do not auto-retry** | Current generation RPCs must use the trusted Flow UI transport. If that path still fails, compare one manual Generate in the same Chrome before changing cookies/network. |
+| `NO_INJECTION_RESULT` | `chrome.scripting.executeScript` resolved with no frame result (`background.js:540`), so the envelope never ran — the Flow tab went away or was still booting at the moment of the call. Most likely on the first captcha-bearing RPC after an agent restart | Retried with backoff, counts against `MAX_RETRIES` | Usually transient — retry first. Rule out the lookalikes before digging: a failed mint reports `CAPTCHA_FAILED`, an oversized payload is not it (`MAX_RPC_TEXT` is 32 MB), and a structured-clone failure surfaces as 500, not 502. If it repeats, pin the Flow tab and reload the extension |
+| `NO_FLOW_PROJECT` | A low-level caller reached batchexecute without a project id | **Terminal — not retried** | Use `POST /api/projects` to create a real Flow project, or call a public `/api/flow/*` endpoint without `project_id` so the session-project lease resolves one automatically |
+| `UNSUPPORTED_ON_BATCH_API` | A capability whose payload was never captured off the new UI, all on the Veo path: **video upscale**, **Veo r2v**, **Veo start+end-frame chaining**. Every Omni mode is ported, so this never names Omni any more | **Terminal — not retried** | For chaining and r2v, `FLOW_ALLOW_DEGRADED=1` falls back to plain i2v off the start frame. Upscale has no fallback. Real fix: capture the payload — `docs/CAPTURE.md` |
+| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` | Google rejected the generation as unusual activity / reCAPTCHA risk evaluation | **Do not auto-retry** — repeated submits can prolong the block | FlowKit holds all generation submits for `FLOW_UNUSUAL_ACTIVITY_COOLDOWN_S` (default 3600s); the hold is saved to `flow_generation_hold.json` and survives a restart — see `GET /api/flow/status` → `generation_throttle`. Keep the browser/session/network stable. Lift it early (`POST /api/flow/clear-hijack`) only once manual generation in the Flow UI works again |
+| `[HIJACK] extension_hijack_detected` | The page's reCAPTCHA wrapper marked the token as coming from an extension; the bypass did not capture the pristine `execute` | Retried after a 30s hold, **at most 3 attempts**, then `FAILED` | Reload the Flow tab and resubmit once. If it keeps failing, stop and check that manual generation in the Flow UI still works before trying again |
 | `no ogiZ0b envelope in response` | The RPC answered but not with the payload we came for — usually a signed-out page returning an HTML redirect | Retried with backoff | Re-sign in on the Flow tab |
 | `Polling timeout after Ns: Media not found.` | The job never produced media inside the budget | Terminal after `MAX_RETRIES` | The quoted complaint is a **diagnostic, not the cause** — finished jobs report it too. Check the Flow UI: if the clip is there, raise `VIDEO_POLL_TIMEOUT` |
 
@@ -155,6 +164,13 @@ Three behaviours on this path routinely look like bugs and are not:
 
 - **A poll can say "Media not found." and the job still finishes.** The project
   listing is what decides; the poll is a hint. Never treat the complaint as fatal.
+- **CRITICAL: Polling timeout must NOT trigger entity re-upload.**
+  `processor.py:_handle_failure` had a bug where matching `"not found"` triggered `_recover_entity_not_found`,
+  which falsely re-uploaded the start image and overwrote the genuine generated scene image media ID.
+  The guard in `processor.py` (line 485) is:
+  `if "not found" in str(error_msg).lower() and "polling timeout" not in str(error_msg).lower():`
+  If a scene's `image_media_id` was accidentally overwritten by this bug, check `/api/requests` history
+  or restore the original generated image media ID from the initial GENERATE_IMAGE completed payload.
 - **A media id arrives before the clip is fetchable.** The media record serves
   the poster image first and grows the `/video/` url in later, so a scene sits
   PENDING for a while after its id exists. Downloading on the id alone saves a
@@ -191,10 +207,10 @@ When the user describes a symptom in plain language, map it here first.
 | Problem | Solution |
 |---------|----------|
 | Extension shows "Agent disconnected" | Start `python -m agent.main` |
-| Extension shows "No token" | Expected on the batch path — there is no bearer any more. Only act on it with `USE_BATCH_RPC=0` |
+| Extension shows "No token" | Expected — there is no bearer any more. Not a fault |
 | `CAPTCHA_FAILED: NO_FLOW_TAB` | Open `https://flow.google.com/` — and check the extension is v0.3.0+, older builds only matched the dead labs.google URL and could not see the tab that was right there |
 | 403 `MODEL_ACCESS_DENIED` | Tier mismatch — `GET /api/flow/credits`, downgrade model in `models.json` via `/fk-change-model` |
-| `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Check transport first: a direct `grecaptcha.enterprise.execute()` can be rewritten to `extension_hijack_detected`. Current FlowKit generation must go through the real Flow UI trusted-click path. If manual Generate in the same Chrome also fails, only then investigate session/network trust; do not start with public proxies or destructive cookie clearing. |
+| 403 `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / `reCAPTCHA evaluation failed` | Google flagged the session as bot-like (rapid bursts, VPN/shared IP, stale cookies). **Pause submits**, then in Chrome: `chrome://settings/cookies` → remove cookies for `google.com` and `labs.google` → reload `flow.google.com` → sign in & solve any captcha → resubmit with ≥1s gap and ≤5 concurrent. Switch network or wait 1–6 h if still blocked |
 | Scene images inconsistent across scenes | Check all refs have UUID `media_id` — run `/fk-fix-uuids` |
 | `media_id` starts with `CAMS...` | Run `/fk-fix-uuids` to extract UUID from URL |
 | Upscale fails on every scene | On the batch path upscale is unported (`UNSUPPORTED_ON_BATCH_API`) — no upsampler rpc has been captured. On the legacy path it needs `PAYGATE_TIER_TWO` |
@@ -210,6 +226,12 @@ When the user describes a symptom in plain language, map it here first.
 Review runs outside the worker — no retry policy applies, the call just raises.
 Providers, models and efforts come from `agent/providers.json`; see
 `/fk-change-provider`.
+
+No review CLI installed? Score the sheets yourself instead —
+`POST /api/videos/<VID>/review-sheets`, score the sheets by hand, then
+`POST .../review-submit`. See `/fk-review-video`. A `review` call that fails
+with "command not found" / non-zero exit before producing JSON almost always
+means the CLI binary is missing, not that the video is bad.
 
 | Error | Cause | Fix |
 |---|---|---|
@@ -234,6 +256,43 @@ Decision order — stop at first match:
 3. **`captcha` / `recaptcha`** → PENDING if retry_count < 10; else FAILED.
 4. **Default** → increment `retry_count`; if < `MAX_RETRIES` (5), schedule retry at `now + min(2^retry * 10, 300)`s. Else FAILED.
 
+### H. Provider-job errors (assistant / external workers)
+
+Provider jobs live outside the worker retry policy above — the queue is
+`POST /api/provider-jobs`, the worker is `agent/worker/assistant_worker.py`.
+Check the job row first: `GET /api/provider-jobs?provider=assistant&limit=20`.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Job stuck `QUEUED` | No worker running | Start `assistant_worker.py` (see `/fk-provider`) |
+| Job stuck `CLAIMED`/`RUNNING`, `lease_expires_at` in the past | Worker died without heartbeating | Wait for expiry — another worker reclaims it automatically |
+| Job `FAILED`, `error_message` set | The worker reported a failure | Read `error_message`; fix the worker-side cause, then resubmit |
+| `409` on `/heartbeat`, `/progress`, `/complete`, `/fail` | Not the lease holder — `claimed_by` differs, or the job already left `CLAIMED`/`RUNNING` | Use the `worker_id` that claimed it; if the lease expired, re-claim |
+| Request `PROCESSING` forever but no provider job exists | Job creation failed server-side | Check server logs around the request; the `provider_job_id` column on the request row |
+| `400 Unknown provider '<name>'` | Typo, or the provider isn't registered | Names come from `GET /api/providers/status` |
+| `400 provider 'flow' does not support audio` | TTS routed to flow | Use `assistant` or `local` for `/api/tts/generate` |
+| `Cannot fetch video for scene ...` in review | Remote URL dead and no Flow fallback (not connected, or non-Flow media) | Re-check the URL; for Flow media connect the extension, for local files verify the path exists |
+
+### I. muse2api gateway errors (`provider: muse2api`)
+
+No provider job is involved — the worker calls the gateway directly, so the
+request's `error_message` is the whole story. It reads
+`muse2api <code> (HTTP <status>): <message>`, where `<code>` is the gateway's
+own OpenAI error code. Check the gateway with `curl -s $MUSE2API_URL/readyz`.
+
+| Error | Cause | Fix |
+|---|---|---|
+| Requests stay `PENDING`, `muse2api.available: false` in `/api/providers/status` | `MUSE2API_URL` unset | Set `MUSE2API_URL` (+ `MUSE2API_KEY`) and restart the server |
+| `muse2api connection_error` | Gateway down or wrong URL | Start muse2api; verify `MUSE2API_URL` |
+| `muse2api invalid_api_key (HTTP 401)` | Key mismatch | `MUSE2API_KEY` must equal the gateway's `MUSE2API_API_KEY` |
+| `muse2api no_account_available (HTTP 503)` | No usable muse.ai account (`readyz` shows `accounts.available: 0`) | Import/renew accounts via the gateway's `/admin/accounts` |
+| `muse2api upstream_auth_failed` | The muse.ai session expired | Re-export cookies and update the account on the gateway |
+| `muse2api upstream_quota_exhausted (HTTP 429)` | Account out of quota | Wait out the cooldown or add accounts |
+| `muse2api upstream_refused` / `task_failed` | muse.ai answered but produced nothing usable (often a content refusal) | Rephrase the prompt; the worker retries it as usual |
+| `muse2api timeout` | Image call or video task exceeded `MUSE2API_TIMEOUT_S` | Check the gateway logs; raise the env var if renders are just slow |
+| `muse2api has no end-frame input for chained video` | Chained scene on muse2api | `MUSE2API_ALLOW_DEGRADED=1` (plain i2v), or render that scene on `flow` |
+| `... does not support job kind 'edit_image'` / `'upscale'` | Not offered by muse.ai | Use `flow` for edits and upscale |
+
 ## Output format
 
 Always end with a prescription block:
@@ -243,7 +302,6 @@ Always end with a prescription block:
 Symptom:     <what the user observed>
 Root cause:  <what actually went wrong>
 Layer:       Flow | Extension | FastAPI | Worker | YouTube | Env
-Transport:   batch (flow.google.com) | legacy REST (aisandbox-pa)
 Auto-handler: <which branch of _handle_failure fires, or "none — terminal">
 
 === FIX ===

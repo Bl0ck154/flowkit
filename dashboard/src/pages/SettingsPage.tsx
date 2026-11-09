@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Globe } from 'lucide-react'
+import { LANGS, LANG_LABELS, type Lang } from '../i18n/translations'
 import { fetchAPI, patchAPI } from '../api/client'
 import { useTranslation } from '../i18n/useTranslation'
 import type { RoleAssignment, ProvidersResponse, ProviderModelsResponse, ProvidersUpdateResponse } from '../types'
@@ -39,7 +40,7 @@ function sameAssignment(a: RoleAssignment, b: RoleAssignment): boolean {
 }
 
 export default function SettingsPage() {
-  const { t } = useTranslation()
+  const { lang, setLang, t } = useTranslation()
   const [data, setData] = useState<ProvidersResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -180,6 +181,30 @@ export default function SettingsPage() {
 
       <Card className="py-4">
         <CardHeader>
+          <CardTitle className="text-xs tracking-widest uppercase flex items-center gap-1.5">
+            <Globe size={13} style={{ color: 'var(--accent)' }} />
+            {t('settings.language.title')}
+          </CardTitle>
+          <CardDescription className="text-[11px]">{t('settings.language.desc')}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="max-w-xs">
+            <select
+              value={lang}
+              onChange={e => setLang(e.target.value as Lang)}
+              className={CONTROL_CLASS}
+              style={CONTROL_STYLE}
+            >
+              {LANGS.map(l => (
+                <option key={l} value={l}>{LANG_LABELS[l]}</option>
+              ))}
+            </select>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="py-4">
+        <CardHeader>
           <CardTitle className="text-xs tracking-widest uppercase">{t('settings.providers.title')}</CardTitle>
           <CardDescription className="text-[11px]">{t('settings.testHint')}</CardDescription>
           <CardAction>
@@ -194,7 +219,7 @@ export default function SettingsPage() {
             {Object.entries(providers).map(([name, info]) => (
               <div key={name} className="flex items-center gap-3 text-[11px]">
                 <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: info.installed ? 'var(--green)' : 'var(--red)' }} />
-                <span style={{ width: 90 }}>{info.binary}</span>
+                <span style={{ width: 90 }}>{info.binary ?? name}</span>
                 <span style={{ color: 'var(--muted)', width: 100 }}>
                   {info.installed ? t('settings.providers.installed') : t('settings.providers.missing')}
                 </span>
@@ -252,7 +277,7 @@ export default function SettingsPage() {
                   >
                     {Object.entries(providers).map(([name, p]) => (
                       <option key={name} value={name} disabled={!p.installed}>
-                        {p.installed ? p.binary : `${p.binary} · ${t('settings.notInstalled')}`}
+                        {p.installed ? (p.binary ?? name) : `${p.binary} · ${t('settings.notInstalled')}`}
                       </option>
                     ))}
                   </select>

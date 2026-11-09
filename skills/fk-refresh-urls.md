@@ -10,6 +10,27 @@ Usage: `/fk-refresh-urls <video_id> [--project-id <PID>]`
 
 ## Pre-flight
 
+### Step 0: Skip when all URLs are local (provider no-op)
+
+Assistant-provider media is stored as `file://` URLs, which never expire —
+refreshing them is a no-op. Check first:
+
+```bash
+curl -s "http://127.0.0.1:8100/api/scenes?video_id=${VID}" | python3 -c "
+import sys, json
+scenes = json.load(sys.stdin)
+urls = [v for s in scenes for k, v in s.items()
+        if k.endswith('_url') and v]
+remote = [u for u in urls if u.startswith('http')]
+print(f'{len(urls)} urls, {len(remote)} remote')
+"
+# If remote == 0: STOP. Nothing to refresh — all media is local.
+```
+
+Only continue below when remote URLs exist (Flow's signed GCS URLs expire
+after hours/days).
+
+
 ```bash
 curl -s http://127.0.0.1:8100/api/flow/status
 # Must show: {"connected": true, "transport": "batch"}
@@ -116,7 +137,7 @@ curl -X PATCH "http://127.0.0.1:8100/api/scenes/<SID>" \
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| `flow_key_present: false` | No bearer token — **expected on the batch path** | Ignore; only meaningful with `USE_BATCH_RPC=0` |
+| `flow_key_present: false` | No bearer token — **expected**; batchexecute authenticates in the page | Ignore |
 | `Extension not connected` | Chrome extension WS disconnected | Check the extension is enabled, refresh the Flow tab |
 | `refreshed: 0`, `found: 0` | No media ids stored for this project | Nothing to refresh — check the project id |
 | `refreshed: 0`, `found: N` | Every re-sign failed | Read the agent log; usually `NO_FLOW_TAB` or a signed-out Flow tab |

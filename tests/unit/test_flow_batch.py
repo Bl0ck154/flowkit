@@ -115,10 +115,11 @@ class TestImageRequest:
 
 
 class TestImageUpscaleRequest:
-    PID = "11111111-2222-3333-4444-555555555555"
-
-    @pytest.mark.parametrize("resolution,wire", [("2k", 1), ("4K", 2),
-                                                   ("UPSAMPLE_IMAGE_RESOLUTION_2K", 1)])
+    @pytest.mark.parametrize("resolution,wire", [
+        ("2k", 1),
+        ("4K", 2),
+        ("UPSAMPLE_IMAGE_RESOLUTION_2K", 1),
+    ])
     def test_resolution_maps_to_live_sprcad_wire(self, resolution, wire):
         payload = inner(fb.image_upscale_request("media-1", resolution))
         assert payload[0] == "media-1"
@@ -192,8 +193,7 @@ class TestVideoRequest:
 
     def test_text_video_matches_the_captured_yhhmef_shape(self):
         payload = inner(fb.text_video_request(
-            "a boat",
-            self.PID,
+            "a boat", self.PID,
             aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
             model="abra_t2v_4s",
         ))
@@ -234,21 +234,6 @@ class TestVideoRequest:
         assert request[-1] == [4]
         assert payload[2][1] == 2
 
-    def test_upscale_matches_the_captured_1080p_slots(self):
-        payload = inner(fb.upscale_request(
-            "media-1", self.PID,
-            aspect="VIDEO_ASPECT_RATIO_LANDSCAPE",
-            model="veo_3_1_upsampler_1080p",
-        ))
-        item = payload[0][0]
-        assert len(item) == 32
-        assert item[0] == [None, "media-1"]
-        assert item[2] == 1
-        assert item[6] == fb.VIDEO_ASPECT_LANDSCAPE
-        assert item[31] == "veo_3_1_upsampler_1080p"
-        assert payload[1][5] == self.PID
-        assert fb.CAPTCHA_SLOT in json.dumps(payload)
-
 
 class TestReaders:
     OP = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -263,23 +248,19 @@ class TestReaders:
         url = f"https://{fb.MEDIA_HOST}/image/{self.MID}?sig=x"
         assert len(fb.read_images([url, url])) == 1
 
-    def test_image_upscale_reads_synchronous_encoded_image(self):
-        assert fb.read_upscaled_image([["media"], "A" * 200]) == "A" * 200
-        with pytest.raises(fb.FlowBatchError):
-            fb.read_upscaled_image([["media"], "short"])
-
     def test_text_video_submit_reads_media_and_workflow_ids(self):
         payload = [None, 10, [], [[self.MID, "project-1", self.OP, "CAE"]]]
-        submitted = fb.read_text_video_submit(payload)
-        assert submitted == {
+        assert fb.read_text_video_submit(payload) == {
             "media_id": self.MID,
             "project_id": "project-1",
             "workflow_id": self.OP,
             "status": "CAE",
         }
 
-    def test_upscale_submit_reads_the_new_media_id(self):
-        assert fb.read_upscaled_media_id([[self.MID + "_upsampled"]]) == self.MID + "_upsampled"
+    def test_image_upscale_reads_synchronous_encoded_image(self):
+        assert fb.read_upscaled_image([["media"], "A" * 200]) == "A" * 200
+        with pytest.raises(fb.FlowBatchError):
+            fb.read_upscaled_image([["media"], "short"])
 
     def test_operation_reads_the_id_and_status(self):
         op = fb.read_operation([None, 50, [[self.OP, "proj", "scene", "CAE"]]])
@@ -349,11 +330,16 @@ class TestResolvers:
 
     def test_nicknames_resolve_to_wire_names(self):
         assert fb.resolve_image_model("NANO_BANANA_PRO") == "GEM_PIX_2"
-        assert fb.resolve_image_model("NANO_BANANA_2") == "NARWHAL"
+        assert fb.resolve_image_model("NANO_BANANA_2_1") == "BELUGA"
         assert fb.resolve_image_model("NANO_BANANA_2_LITE") == "HARBOR_SEAL"
+
+    def test_nano_banana_2_lands_on_its_successor_not_the_retired_narwhal(self):
+        assert fb.resolve_image_model("NANO_BANANA_2") == "BELUGA"
 
     def test_wire_names_and_future_model_ids_pass_through(self):
         assert fb.resolve_image_model("NARWHAL") == "NARWHAL"
+        assert fb.resolve_image_model("BELUGA") == "BELUGA"
+        assert fb.resolve_image_model("beluga_thinking_high") == "BELUGA_THINKING_HIGH"
         assert fb.resolve_image_model("harbor_seal") == "HARBOR_SEAL"
         assert fb.resolve_image_model("FUTURE_BANANA_3") == "FUTURE_BANANA_3"
 

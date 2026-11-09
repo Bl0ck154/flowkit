@@ -27,6 +27,7 @@ class Video(DomainModel):
     horizontal_url: Optional[str] = None
     thumbnail_url: Optional[str] = None
     duration: Optional[float] = None
+    target_duration_s: Optional[float] = None
     resolution: Optional[str] = None
     youtube_id: Optional[str] = None
     privacy: str = "unlisted"

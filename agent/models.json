@@ -2,12 +2,12 @@
   "video_models": {
     "PAYGATE_TIER_TWO": {
       "frame_2_video": {
-        "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_lite_low_priority",
-        "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite_low_priority"
+        "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_lite",
+        "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite"
       },
       "start_end_frame_2_video": {
-        "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_lite_low_priority",
-        "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite_low_priority"
+        "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_lite",
+        "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_lite"
       },
       "reference_frame_2_video": {
         "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_r2v_fast_landscape_ultra_relaxed",
@@ -55,7 +55,8 @@
   },
   "image_models": {
     "NANO_BANANA_PRO": "GEM_PIX_2",
-    "NANO_BANANA_2": "NARWHAL",
+    "NANO_BANANA_2_1": "BELUGA",
+    "NANO_BANANA_2": "BELUGA",
     "NANO_BANANA_2_LITE": "HARBOR_SEAL"
   },
   "default_image_model": "NANO_BANANA_PRO",

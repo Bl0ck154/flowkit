@@ -146,3 +146,29 @@ def sample_character_row(sample_uuid):
         "created_at": "2026-04-01T00:00:00",
         "updated_at": "2026-04-01T00:00:00",
     }
+
+
+@pytest.fixture
+async def test_db(tmp_path, monkeypatch):
+    """Point the FlowKit SQLite DB at a temp file and initialize the schema.
+
+    Resets the cached schema connection so each test gets a fresh database.
+    NOTE: agent.db.schema binds DB_PATH at import time
+    (``from agent.config import DB_PATH``), so patch the binding in the
+    schema module, not the attribute on agent.config.
+    """
+    from agent.db import schema
+    monkeypatch.setattr(schema, "DB_PATH", tmp_path / "test.db")
+    schema._db_connection = None
+    await schema.init_db()
+    yield tmp_path / "test.db"
+    await schema.close_db()
+    schema._db_connection = None
+
+
+@pytest.fixture(autouse=True)
+def _generation_hold_path(tmp_path, monkeypatch):
+    """Keep FlowClient's persisted generation hold out of the real agent dir."""
+    path = tmp_path / "flow_generation_hold.json"
+    monkeypatch.setattr("agent.services.flow_client.FLOW_GENERATION_HOLD_PATH", path)
+    return path

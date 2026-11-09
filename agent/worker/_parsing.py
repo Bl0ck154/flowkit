@@ -109,3 +109,49 @@ def _extract_output_url(result: dict, req_type: str) -> str:
                 return ""  # URL will be set by _save_raw_bytes in operations.py
 
     return data.get("videoUri", data.get("imageUri", ""))
+
+
+def _extract_operations(result: dict) -> list[dict]:
+    """Extract operations list from video gen / upscale submit response.
+
+    Supports two response schemas:
+    - OLD (Lite/Fast/Ultra): {"data": {"operations": [{"operation": {"name": ...}, "status": ...}]}}
+    - NEW (Low Priority — veo_3_1_*_low_priority, *_ultra_relaxed):
+        {"data": {"workflows": [{"name": "...", "metadata": {"primaryMediaId": "..."}}],
+                  "media": [{"name": "...", ...}]}}
+    """
+    data = result.get("data", result)
+    ops = data.get("operations", [])
+    if ops:
+        for op in ops:
+            op_name = op.get("operation", {}).get("name")
+            if not op_name:
+                logger.warning("Operation missing name: %s", op)
+        return ops
+
+    # NEW schema: workflows + media → synthesize operation entries
+    workflows = data.get("workflows", [])
+    media_list = data.get("media", [])
+    if not workflows or not media_list:
+        return []
+
+    media_by_id = {m.get("name"): m for m in media_list if m.get("name")}
+    synthesized = []
+    for wf in workflows:
+        wf_name = wf.get("name", "")
+        meta = wf.get("metadata", {})
+        primary_media_id = meta.get("primaryMediaId", "")
+        if not wf_name or not primary_media_id:
+            continue
+        synthesized.append({
+            "operation": {
+                "name": wf_name,
+                "metadata": {"video": {"mediaId": primary_media_id}},
+            },
+            "status": "MEDIA_GENERATION_STATUS_PENDING",
+            "_workflow_mode": True,
+            "_primary_media_id": primary_media_id,
+        })
+    if synthesized:
+        logger.info("Detected workflow-schema response: %d workflow(s) → synthesized", len(synthesized))
+    return synthesized
