@@ -182,7 +182,7 @@ async def generate_omni_flash_text_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
-    omni_version: str = "1.1",
+    omni_version: str = "1.2",
 ) -> dict:
     """Submit Omni Flash text-to-video (1.1 ``abra`` or 1.2 ``macaron_cookie``)."""
     resolution = _validate_resolution(resolution)
@@ -245,7 +245,7 @@ async def _submit_omni_frame_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
-    omni_version: str = "1.1",
+    omni_version: str = "1.2",
 ) -> dict:
     """Submit Omni first-frame or First+Last generation.
 
@@ -304,7 +304,7 @@ async def generate_omni_flash_first_frame_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
-    omni_version: str = "1.1",
+    omni_version: str = "1.2",
 ) -> dict:
     """Submit Omni Flash First frame -> video."""
     return await _submit_omni_frame_video(
@@ -333,7 +333,7 @@ async def generate_omni_flash_first_last_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
-    omni_version: str = "1.1",
+    omni_version: str = "1.2",
 ) -> dict:
     """Submit Omni Flash First + Last frame -> video."""
     return await _submit_omni_frame_video(
@@ -361,7 +361,7 @@ async def generate_omni_flash_video(
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT",
     user_paygate_tier: str = "PAYGATE_TIER_ONE",
     seed: int | None = None,
-    omni_version: str = "1.1",
+    omni_version: str = "1.2",
 ) -> dict:
     """Submit Omni Flash Ingredients/reference-to-video generation.
 

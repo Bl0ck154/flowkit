@@ -112,6 +112,7 @@ async def test_batch_text_video_builds_4s_yhhmef_submit(monkeypatch):
             project_id="11111111-2222-3333-4444-555555555555",
             duration_s=4,
             aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            omni_version="1.1",
         )
 
     assert result["status"] == 200
@@ -147,6 +148,7 @@ async def test_batch_first_frame_video_uses_eb1hjf_abra_i2v(monkeypatch):
             project_id=pid,
             duration_s=6,
             aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            omni_version="1.1",
         )
 
     assert result["status"] == 200
@@ -299,7 +301,8 @@ class TestMigratedOmniReferenceBatchModes:
         result = await generate_omni_flash_first_last_video(
             start_image_media_id="start", end_image_media_id="end",
             prompt="morph", project_id="pid", duration_s=4,
-            resolution="360p", aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE")
+            resolution="360p", aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            omni_version="1.1")
         assert result["status"] == 200
         assert result["data"]["model"] == "omni_flash_i2v_4s_first_last_360p"
         assert result["data"]["resolution"] == "360p"
@@ -332,7 +335,7 @@ class TestMigratedOmniReferenceBatchModes:
         result = await generate_omni_flash_video(
             reference_media_ids=["a", "b", "c"], prompt="keep all refs",
             project_id="pid", duration_s=6, resolution="720p",
-            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT")
+            aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT", omni_version="1.1")
         assert result["status"] == 200
         assert result["data"]["model"] == "abra_r2v_6s"
         assert result["data"]["flowkitPolling"]["mode"] == "batch_operation"
@@ -348,7 +351,8 @@ class TestMigratedOmniReferenceBatchModes:
         await generate_omni_flash_video(
             reference_media_ids=["a", "b"], prompt="refs", project_id="pid",
             duration_s=4, resolution="360p",
-            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE")
+            aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            omni_version="1.1")
         _rpcid, freq, _captcha = client._batch_payload.await_args.args[:3]
         payload = __import__("json").loads(__import__("json").loads(freq)[0][0][1])
         req = payload[0][0]

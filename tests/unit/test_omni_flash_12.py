@@ -135,16 +135,52 @@ async def test_omni12_text_video_uses_macaron_key():
 
 
 @pytest.mark.asyncio
-async def test_default_version_keeps_omni_11_keys_and_durations():
+async def test_explicit_legacy_11_keeps_old_keys_and_durations():
     client = _operation_client()
     with patch("agent.services.omni_flash.get_flow_client", return_value=client):
         result = await generate_omni_flash_first_last_video(
             start_image_media_id="a", end_image_media_id="b", prompt="p",
             project_id=PID, duration_s=4, aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+            omni_version="1.1",
         )
         with pytest.raises(ValueError, match="unsupported"):
             await generate_omni_flash_first_last_video(
                 start_image_media_id="a", end_image_media_id="b", prompt="p",
                 project_id=PID, duration_s=3, aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+                omni_version="1.1",
             )
     assert result["data"]["model"] == "omni_flash_i2v_4s_first_last"
+
+
+@pytest.mark.asyncio
+async def test_omitted_version_defaults_to_omni_12_first_frame():
+    client = _operation_client()
+    with patch("agent.services.omni_flash.get_flow_client", return_value=client):
+        result = await generate_omni_flash_first_frame_video(
+            start_image_media_id="media", prompt="p", project_id=PID,
+            duration_s=7, resolution="720p",
+        )
+    assert result["data"]["model"] == "macaron_cookie_i2v_7s"
+
+
+def test_flow_api_defaults_to_omni12_for_all_video_shapes():
+    from agent.api.flow import (
+        GenerateVideoRequest, GenerateVideoRefsRequest,
+        GenerateOmniFlashVideoRequest, GenerateOmniFlashTextVideoRequest,
+    )
+    assert GenerateVideoRequest(
+        start_image_media_id="m", scene_id="s", prompt="p",
+        model_family="omni_flash",
+    ).omni_version == "1.2"
+    assert GenerateVideoRefsRequest(
+        reference_media_ids=["m"], scene_id="s", prompt="p",
+        model_family="omni_flash",
+    ).omni_version == "1.2"
+    assert GenerateOmniFlashVideoRequest(
+        reference_media_ids=["m"], prompt="p",
+    ).omni_version == "1.2"
+    assert GenerateOmniFlashTextVideoRequest(prompt="p").omni_version == "1.2"
+    assert GenerateVideoRequest(
+        start_image_media_id="m", scene_id="s", prompt="p",
+        omni_version="1.1",
+    ).omni_version == "1.1"
