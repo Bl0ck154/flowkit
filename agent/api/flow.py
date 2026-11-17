@@ -62,8 +62,8 @@ class GenerateVideoRequest(BaseModel):
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
     resolution: Literal["360p", "720p"] = "720p"
-    # Omni only: "1.2" = Omni 1.2 Flash (3-15s; first+last only for frames).
-    omni_version: Literal["1.1", "1.2"] = "1.1"
+    # Omni 1.2 is the default; legacy 1.1 remains an explicit opt-in.
+    omni_version: Literal["1.1", "1.2"] = "1.2"
 
 
 class GenerateVideoRefsRequest(BaseModel):
@@ -78,6 +78,7 @@ class GenerateVideoRefsRequest(BaseModel):
     model_family: Literal["veo", "omni_flash"] = "veo"
     duration_s: int = 8
     resolution: Literal["360p", "720p"] = "720p"
+    omni_version: Literal["1.1", "1.2"] = "1.2"
 
 
 class GenerateOmniFlashVideoRequest(BaseModel):
@@ -89,7 +90,7 @@ class GenerateOmniFlashVideoRequest(BaseModel):
     resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
-    omni_version: Literal["1.1", "1.2"] = "1.1"
+    omni_version: Literal["1.1", "1.2"] = "1.2"
 
 
 class GenerateOmniFlashTextVideoRequest(BaseModel):
@@ -100,7 +101,7 @@ class GenerateOmniFlashTextVideoRequest(BaseModel):
     resolution: Literal["360p", "720p"] = "720p"
     aspect_ratio: str = "VIDEO_ASPECT_RATIO_PORTRAIT"
     user_paygate_tier: str = "PAYGATE_TIER_ONE"
-    omni_version: Literal["1.1", "1.2"] = "1.1"
+    omni_version: Literal["1.1", "1.2"] = "1.2"
 
 
 class UpscaleVideoRequest(BaseModel):
@@ -392,11 +393,12 @@ async def generate_video_refs(body: GenerateVideoRefsRequest):
                 resolution=body.resolution,
                 aspect_ratio=body.aspect_ratio,
                 user_paygate_tier=body.user_paygate_tier,
+                omni_version=body.omni_version,
             )
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     else:
-        payload = body.model_dump(exclude={"model_family", "duration_s", "resolution"})
+        payload = body.model_dump(exclude={"model_family", "duration_s", "resolution", "omni_version"})
         payload["project_id"] = project_id
         result = await client.generate_video_from_references(**payload)
 
