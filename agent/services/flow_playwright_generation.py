@@ -118,19 +118,23 @@ async def _click_radio_icon(page: Any, icon: str) -> None:
 
 
 async def _click_radio_text(page: Any, prefix: str) -> None:
-    buttons = page.locator('button[role="radio"]:visible')
-    chosen = None
-    for i in range(await buttons.count()):
-        item = buttons.nth(i)
-        text = (await item.inner_text()).strip()
-        if text.startswith(prefix):
-            chosen = item
-            break
-    if chosen is None:
-        raise RuntimeError(f"Flow UI radio not found: {prefix}")
-    if await chosen.get_attribute("aria-checked") != "true":
-        await chosen.click()
-    await page.wait_for_timeout(200)
+    # Changing the Flow model asynchronously replaces the resolution/duration
+    # radios. An immediate snapshot can incorrectly report "720p not found"
+    # even though the control appears a moment later. This is entirely before
+    # the paid Generate click; never retry a submitted generation here.
+    for poll in range(9):
+        buttons = page.locator('button[role="radio"]:visible')
+        for i in range(await buttons.count()):
+            item = buttons.nth(i)
+            text = (await item.inner_text()).strip()
+            if text.startswith(prefix):
+                if await item.get_attribute("aria-checked") != "true":
+                    await item.click()
+                await page.wait_for_timeout(200)
+                return
+        if poll < 8:
+            await page.wait_for_timeout(400)
+    raise RuntimeError(f"Flow UI radio not found: {prefix}")
 
 
 async def _select_model(page: Any, label: str) -> None:
