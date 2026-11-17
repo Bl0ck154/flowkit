@@ -44,3 +44,63 @@ async def test_capture_failure_does_not_resubmit():
     with pytest.raises(RuntimeError,match="upstream cancelled"):
         await future
     assert events==["fetch_once","abort"]
+
+@pytest.mark.asyncio
+async def test_radio_waits_for_async_model_options_before_click():
+    from agent.services.flow_playwright_generation import _click_radio_text
+
+    class Item:
+        clicked = 0
+        async def inner_text(self):
+            return "720p"
+        async def get_attribute(self, name):
+            return "false" if name == "aria-checked" else None
+        async def click(self):
+            self.clicked += 1
+
+    class Page:
+        def __init__(self):
+            self.counts = 0
+            self.waits = []
+            self.item = Item()
+        def locator(self, selector):
+            assert selector == 'button[role="radio"]:visible'
+            return self
+        async def count(self):
+            self.counts += 1
+            return 1 if self.counts >= 3 else 0
+        def nth(self, index):
+            assert index == 0
+            return self.item
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    page = Page()
+    await _click_radio_text(page, "720p")
+    assert page.counts == 3
+    assert page.item.clicked == 1
+    assert page.waits == [400, 400, 200]
+
+
+@pytest.mark.asyncio
+async def test_missing_radio_fails_closed_without_click_or_generate():
+    from agent.services.flow_playwright_generation import _click_radio_text
+
+    class Page:
+        def __init__(self):
+            self.polls = 0
+            self.waits = []
+        def locator(self, selector):
+            assert selector == 'button[role="radio"]:visible'
+            return self
+        async def count(self):
+            self.polls += 1
+            return 0
+        async def wait_for_timeout(self, ms):
+            self.waits.append(ms)
+
+    page = Page()
+    with pytest.raises(RuntimeError, match="Flow UI radio not found: 720p"):
+        await _click_radio_text(page, "720p")
+    assert page.polls == 9
+    assert page.waits == [400] * 8
