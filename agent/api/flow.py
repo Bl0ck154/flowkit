@@ -196,9 +196,19 @@ async def extension_status():
     """
     client = get_flow_client()
     session = await inspect_flow_session() if client.connected else {}
+    recovered_idle_tab = False
+    # The persistent Chrome profile may still be authenticated after Flow
+    # parked the browser tab. Reopen the existing session on demand rather
+    # than presenting a closed tab as a logged-out Google account. No
+    # interactive login, paid submission, or quota reset is attempted here.
+    if client.connected and session.get("state") == "NO_FLOW_TAB":
+        session = await ensure_flow_session(wait_s=1.0)
+        recovered_idle_tab = bool(session.get("recovered"))
     signed_in = bool(session.get("signedIn")) if isinstance(session, dict) else False
     return {
         "connected": client.connected,
+        "idle_tab_recovered": recovered_idle_tab,
+        "login_required": session.get("state") == "INTERACTIVE_LOGIN_REQUIRED",
         # One transport now. The key stays so the documented pre-flight check
         # (CLAUDE.md) keeps reading {"transport": "batch", ...}.
         "transport": "batch",
