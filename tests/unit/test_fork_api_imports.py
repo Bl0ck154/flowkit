@@ -58,3 +58,66 @@ async def test_capabilities_route_uses_dynamic_model_inspector():
         result = await flow.get_image_capabilities(refresh=True)
     assert result["models"] == ["BELUGA"]
     inspect.assert_awaited_once_with(refresh=True)
+
+@pytest.mark.asyncio
+async def test_status_recovers_parked_tab_without_claiming_relogin():
+    client = MagicMock(connected=True, _flow_key=None)
+    client.generation_guard_status = {"cooldown_active": True}
+    with (
+        patch.object(flow, "get_flow_client", return_value=client),
+        patch.object(flow, "inspect_flow_session", new_callable=AsyncMock) as inspect,
+        patch.object(flow, "ensure_flow_session", new_callable=AsyncMock) as recover,
+    ):
+        inspect.return_value = {
+            "signedIn": False, "flowTabPresent": False, "state": "NO_FLOW_TAB",
+        }
+        recover.return_value = {
+            "signedIn": True, "flowTabPresent": True,
+            "atTokenPresent": True, "state": "AUTHENTICATED",
+            "recovered": True,
+        }
+        result = await flow.extension_status()
+    assert result["authenticated"] is True
+    assert result["auth_state"] == "AUTHENTICATED"
+    assert result["idle_tab_recovered"] is True
+    assert result["login_required"] is False
+    assert result["generation_throttle"]["cooldown_active"] is True
+    inspect.assert_awaited_once_with()
+    recover.assert_awaited_once_with(wait_s=1.0)
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_pretend_expired_google_login_is_valid():
+    client = MagicMock(connected=True, _flow_key=None)
+    client.generation_guard_status = {}
+    with (
+        patch.object(flow, "get_flow_client", return_value=client),
+        patch.object(flow, "inspect_flow_session", new_callable=AsyncMock) as inspect,
+        patch.object(flow, "ensure_flow_session", new_callable=AsyncMock) as recover,
+    ):
+        inspect.return_value = {"signedIn": False, "state": "NO_FLOW_TAB"}
+        recover.return_value = {
+            "signedIn": False, "flowTabPresent": True,
+            "state": "INTERACTIVE_LOGIN_REQUIRED",
+        }
+        result = await flow.extension_status()
+    assert result["authenticated"] is False
+    assert result["login_required"] is True
+    assert result["idle_tab_recovered"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_does_not_reopen_a_tab_when_already_authenticated():
+    client = MagicMock(connected=True, _flow_key=None)
+    client.generation_guard_status = {}
+    with (
+        patch.object(flow, "get_flow_client", return_value=client),
+        patch.object(flow, "inspect_flow_session", new_callable=AsyncMock) as inspect,
+        patch.object(flow, "ensure_flow_session", new_callable=AsyncMock) as recover,
+    ):
+        inspect.return_value = {
+            "signedIn": True, "flowTabPresent": True, "state": "AUTHENTICATED",
+        }
+        result = await flow.extension_status()
+    assert result["idle_tab_recovered"] is False
+    recover.assert_not_awaited()
